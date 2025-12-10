@@ -834,8 +834,8 @@ class WebServerManager: ObservableObject {
         
         html += """
             </div>
-            <div class='lightbox' id='lightbox' onclick='closeLightbox()'>
-                <span class='lightbox-close'>×</span>
+            <div class='lightbox' id='lightbox'>
+                <span class='lightbox-close' onclick='closeLightbox()'>×</span>
                 <span class='lightbox-nav lightbox-prev' onclick='event.stopPropagation(); changeImage(-1)'>‹</span>
                 <img id='lightbox-img' src='' alt=''>
                 <span class='lightbox-nav lightbox-next' onclick='event.stopPropagation(); changeImage(1)'>›</span>
