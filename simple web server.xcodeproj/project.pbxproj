@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		EDEAAAED2EE98257003399AD /* FlyingFox in Frameworks */ = {isa = PBXBuildFile; productRef = EDEAAAEC2EE98257003399AD /* FlyingFox */; };
 		EDEAAAEF2EE98257003399AD /* FlyingSocks in Frameworks */ = {isa = PBXBuildFile; productRef = EDEAAAEE2EE98257003399AD /* FlyingSocks */; };
+		EDF7BBDA2EE9B61E004A9714 /* Zip in Frameworks */ = {isa = PBXBuildFile; productRef = EDF7BBD92EE9B61E004A9714 /* Zip */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +29,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				EDF7BBDA2EE9B61E004A9714 /* Zip in Frameworks */,
 				EDEAAAED2EE98257003399AD /* FlyingFox in Frameworks */,
 				EDEAAAEF2EE98257003399AD /* FlyingSocks in Frameworks */,
 			);
@@ -74,6 +76,7 @@
 			packageProductDependencies = (
 				EDEAAAEC2EE98257003399AD /* FlyingFox */,
 				EDEAAAEE2EE98257003399AD /* FlyingSocks */,
+				EDF7BBD92EE9B61E004A9714 /* Zip */,
 			);
 			productName = "simple web server";
 			productReference = EDEAAADD2EE97F8F003399AD /* simple web server.app */;
@@ -105,6 +108,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				EDEAAAEB2EE98257003399AD /* XCRemoteSwiftPackageReference "FlyingFox" */,
+				EDF7BBD82EE9B61E004A9714 /* XCRemoteSwiftPackageReference "Zip" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = EDEAAADE2EE97F8F003399AD /* Products */;
@@ -356,6 +360,14 @@
 				minimumVersion = 0.26.0;
 			};
 		};
+		EDF7BBD82EE9B61E004A9714 /* XCRemoteSwiftPackageReference "Zip" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/marmelroy/Zip";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.1.2;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -368,6 +380,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = EDEAAAEB2EE98257003399AD /* XCRemoteSwiftPackageReference "FlyingFox" */;
 			productName = FlyingSocks;
+		};
+		EDF7BBD92EE9B61E004A9714 /* Zip */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = EDF7BBD82EE9B61E004A9714 /* XCRemoteSwiftPackageReference "Zip" */;
+			productName = Zip;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

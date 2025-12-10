@@ -9,6 +9,7 @@ import Foundation
 import Combine
 import FlyingFox
 import UIKit
+import Zip
 
 @MainActor
 class WebServerManager: ObservableObject {
@@ -101,6 +102,20 @@ class WebServerManager: ObservableObject {
                 let path = String(request.path.dropFirst("/gallery/".count))
                 let sortBy = request.query["sort"] ?? "name"
                 return await self.handleGalleryRequest(path: path, sortBy: sortBy)
+            }
+            
+            // Download file route
+            await server.appendRoute("GET /download/*") { [weak self] request in
+                guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                let path = String(request.path.dropFirst("/download/".count))
+                return await self.handleDownloadRequest(path: path)
+            }
+            
+            // Download folder as zip route
+            await server.appendRoute("GET /download-zip/*") { [weak self] request in
+                guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                let path = String(request.path.dropFirst("/download-zip/".count))
+                return await self.handleDownloadZipRequest(path: path)
             }
             
             Task {
@@ -336,7 +351,7 @@ class WebServerManager: ObservableObject {
                 items.append((name: itemURL.lastPathComponent, isDirectory: isDirectory, path: itemPath))
             }
             
-            items.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            items = naturalSort(items)
         } catch {
             return generateErrorHTML("Error reading directory: \(error.localizedDescription)")
         }
@@ -374,7 +389,7 @@ class WebServerManager: ObservableObject {
                                 <span class='item-icon folder'>📁</span>
                                 <span class='item-name'>
                                     <a href='/browse/\(encodedPath)'>\(item.name)</a>
-                                    <small style='color: #999;'> | <a href='/gallery/\(encodedPath)'>View Gallery</a></small>
+                                    <small style='color: #999;'> | <a href='/gallery/\(encodedPath)'>View Gallery</a> | <a href='/download-zip/\(encodedPath)'>Download ZIP</a></small>
                                 </span>
                             </div>
                             """
@@ -384,6 +399,7 @@ class WebServerManager: ObservableObject {
                                 <span class='item-icon folder'>📁</span>
                                 <span class='item-name'>
                                     <a href='/browse/\(encodedPath)'>\(item.name)</a>
+                                    <small style='color: #999;'> | <a href='/download-zip/\(encodedPath)'>Download ZIP</a></small>
                                 </span>
                             </div>
                             """
@@ -394,6 +410,7 @@ class WebServerManager: ObservableObject {
                             <span class='item-icon pdf'>📄</span>
                             <span class='item-name'>
                                 <a href='/file/\(encodedPath)' target='_blank'>\(item.name)</a>
+                                <small style='color: #999;'> | <a href='/download/\(encodedPath)'>Download</a></small>
                             </span>
                         </div>
                         """
@@ -403,6 +420,7 @@ class WebServerManager: ObservableObject {
                             <span class='item-icon'>📝</span>
                             <span class='item-name'>
                                 <a href='/file/\(encodedPath)' target='_blank'>\(item.name)</a>
+                                <small style='color: #999;'> | <a href='/download/\(encodedPath)'>Download</a></small>
                             </span>
                         </div>
                         """
@@ -412,6 +430,7 @@ class WebServerManager: ObservableObject {
                             <span class='item-icon'>🎬</span>
                             <span class='item-name'>
                                 <a href='/file/\(encodedPath)' target='_blank'>\(item.name)</a>
+                                <small style='color: #999;'> | <a href='/download/\(encodedPath)'>Download</a></small>
                             </span>
                         </div>
                         """
@@ -421,6 +440,7 @@ class WebServerManager: ObservableObject {
                             <span class='item-icon image'>🖼️</span>
                             <span class='item-name'>
                                 <a href='/file/\(encodedPath)' target='_blank'>\(item.name)</a>
+                                <small style='color: #999;'> | <a href='/download/\(encodedPath)'>Download</a></small>
                             </span>
                         </div>
                         """
@@ -430,6 +450,7 @@ class WebServerManager: ObservableObject {
                             <span class='item-icon'>📄</span>
                             <span class='item-name'>
                                 <a href='/file/\(encodedPath)' target='_blank'>\(item.name)</a>
+                                <small style='color: #999;'> | <a href='/download/\(encodedPath)'>Download</a></small>
                             </span>
                         </div>
                         """
@@ -634,14 +655,14 @@ class WebServerManager: ObservableObject {
                 }
             }
             
-            // Sort images
+            // Sort images with natural sorting for "name"
             switch sortBy {
             case "date":
                 images.sort { ($0.modificationDate ?? Date.distantPast) > ($1.modificationDate ?? Date.distantPast) }
             case "size":
                 images.sort { $0.size > $1.size }
             default: // "name"
-                images.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                images = naturalSortImages(images)
             }
         } catch {
             return generateErrorHTML("Error reading directory: \(error.localizedDescription)")
@@ -1208,5 +1229,104 @@ class WebServerManager: ObservableObject {
         guard components.count >= 2,
               let second = Int(components[1]) else { return false }
         return second >= 16 && second <= 31
+    }
+    
+    // MARK: - Download Handlers
+    
+    private func handleDownloadRequest(path: String) async -> HTTPResponse {
+        guard let folderURL = selectedFolderURL else {
+            return HTTPResponse(statusCode: .internalServerError)
+        }
+        
+        let decodedPath = path.removingPercentEncoding ?? path
+        let fileURL = folderURL.appendingPathComponent(decodedPath)
+        
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            return HTTPResponse(statusCode: .notFound)
+        }
+        
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let filename = fileURL.lastPathComponent
+            let mimeType = mimeTypeForPath(fileURL.path)
+            
+            return HTTPResponse(statusCode: .ok,
+                              headers: [
+                                .contentType: mimeType,
+                                .contentDisposition: "attachment; filename=\"\(filename)\"",
+                                .contentLength: "\(data.count)"
+                              ],
+                              body: data)
+        } catch {
+            return HTTPResponse(statusCode: .internalServerError)
+        }
+    }
+    
+    private func handleDownloadZipRequest(path: String) async -> HTTPResponse {
+        guard let folderURL = selectedFolderURL else {
+            return HTTPResponse(statusCode: .internalServerError)
+        }
+        
+        let decodedPath = path.removingPercentEncoding ?? path
+        let targetURL = decodedPath.isEmpty ? folderURL : folderURL.appendingPathComponent(decodedPath)
+        
+        guard FileManager.default.fileExists(atPath: targetURL.path) else {
+            return HTTPResponse(statusCode: .notFound)
+        }
+        
+        var isDirectory: ObjCBool = false
+        FileManager.default.fileExists(atPath: targetURL.path, isDirectory: &isDirectory)
+        
+        guard isDirectory.boolValue else {
+            return HTTPResponse(statusCode: .badRequest)
+        }
+        
+        do {
+            // Create a temporary zip file
+            let tempDir = FileManager.default.temporaryDirectory
+            let zipFilename = "\(targetURL.lastPathComponent).zip"
+            let zipURL = tempDir.appendingPathComponent(zipFilename)
+            
+            // Remove existing zip file if it exists
+            try? FileManager.default.removeItem(at: zipURL)
+            
+            // Create zip archive using Zip library
+            try Zip.zipFiles(paths: [targetURL], zipFilePath: zipURL, password: nil, progress: nil)
+            
+            // Read the zip data
+            let data = try Data(contentsOf: zipURL)
+            
+            // Clean up temporary file
+            try? FileManager.default.removeItem(at: zipURL)
+            
+            return HTTPResponse(statusCode: .ok,
+                              headers: [
+                                .contentType: "application/zip",
+                                .contentDisposition: "attachment; filename=\"\(zipFilename)\"",
+                                .contentLength: "\(data.count)"
+                              ],
+                              body: data)
+        } catch {
+            return HTTPResponse(statusCode: .internalServerError)
+        }
+    }
+    
+    // MARK: - Natural Sorting
+    
+    private func naturalSort(_ items: [(name: String, isDirectory: Bool, path: String)]) -> [(name: String, isDirectory: Bool, path: String)] {
+        return items.sorted { item1, item2 in
+            // Directories first
+            if item1.isDirectory != item2.isDirectory {
+                return item1.isDirectory
+            }
+            // Then natural sort by name
+            return item1.name.localizedStandardCompare(item2.name) == .orderedAscending
+        }
+    }
+    
+    private func naturalSortImages(_ images: [(name: String, path: String, modificationDate: Date?, size: Int64)]) -> [(name: String, path: String, modificationDate: Date?, size: Int64)] {
+        return images.sorted { image1, image2 in
+            return image1.name.localizedStandardCompare(image2.name) == .orderedAscending
+        }
     }
 }
