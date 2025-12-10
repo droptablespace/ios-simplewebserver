@@ -137,6 +137,13 @@ class WebServerManager: ObservableObject {
             let server = HTTPServer(port: port)
             self.server = server
             
+            // Static file route for libraries
+            await server.appendRoute("GET /static/*") { [weak self] request in
+                guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                let path = String(request.path.dropFirst("/static/".count))
+                return await self.handleStaticFileRequest(path: path)
+            }
+            
             if sourceType == .photoGallery {
                 // Photo gallery routes
                 await server.appendRoute("GET /") { [weak self] request in
@@ -1210,7 +1217,7 @@ class WebServerManager: ObservableObject {
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>\(filename)</title>
-            <script src="https://cdn.jsdelivr.net/npm/markdown-it@14/dist/markdown-it.min.js"></script>
+            <script src="/static/markdown-it.min.js"></script>
             <style>
                 body {
                     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
@@ -1347,6 +1354,29 @@ class WebServerManager: ObservableObject {
         </body>
         </html>
         """
+    }
+    
+    // MARK: - Static File Handler
+    
+    private func handleStaticFileRequest(path: String) async -> HTTPResponse {
+        guard let staticFileURL = Bundle.main.url(forResource: path.replacingOccurrences(of: ".min.js", with: "").replacingOccurrences(of: ".js", with: ""), withExtension: path.contains(".min.js") ? "min.js" : "js") else {
+            return HTTPResponse(statusCode: .notFound)
+        }
+        
+        do {
+            let data = try Data(contentsOf: staticFileURL)
+            let mimeType = path.hasSuffix(".js") ? "application/javascript" : "text/plain"
+            
+            return HTTPResponse(statusCode: .ok,
+                              headers: [
+                                .contentType: mimeType,
+                                .contentLength: "\(data.count)",
+                                HTTPHeader("Cache-Control"): "public, max-age=31536000" // Cache for 1 year
+                              ],
+                              body: data)
+        } catch {
+            return HTTPResponse(statusCode: .internalServerError)
+        }
     }
     
     // MARK: - Helper Methods
