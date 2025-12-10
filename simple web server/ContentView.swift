@@ -20,35 +20,70 @@ struct ContentView: View {
     
     var body: some View {
         VStack(spacing: 20) {
-            Text("Folder Web Server")
+            Text("Simple Web Server")
                 .font(.largeTitle)
                 .fontWeight(.bold)
             
             if let folderURL = serverManager.selectedFolderURL {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Selected Folder:")
+                    Text(serverManager.sourceType == .photoGallery ? "Source: iPhone Photos" : "Selected Folder:")
                         .font(.headline)
-                    Text(folderURL.path)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
+                    if serverManager.sourceType == .folder {
+                        Text(folderURL.path)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    }
                 }
                 .padding()
                 .background(Color.gray.opacity(0.1))
                 .cornerRadius(8)
             }
             
-            Button(action: {
-                showFolderPicker = true
-            }) {
-                Label("Choose Folder", systemImage: "folder")
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(Color.blue)
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
+            // Source Type Selection
+            if !serverManager.isServerRunning {
+                VStack(spacing: 12) {
+                    Text("Choose Source:")
+                        .font(.headline)
+                    
+                    HStack(spacing: 12) {
+                        Button(action: {
+                            showFolderPicker = true
+                        }) {
+                            VStack(spacing: 8) {
+                                Image(systemName: "folder.fill")
+                                    .font(.system(size: 32))
+                                Text("Folder")
+                                    .font(.caption)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.blue)
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
+                        }
+                        
+                        Button(action: {
+                            Task {
+                                await serverManager.requestPhotoLibraryAccess()
+                            }
+                        }) {
+                            VStack(spacing: 8) {
+                                Image(systemName: "photo.fill.on.rectangle.fill")
+                                    .font(.system(size: 32))
+                                Text("Photos")
+                                    .font(.caption)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.green)
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
+                        }
+                    }
+                }
+                .padding(.horizontal)
             }
-            .padding(.horizontal)
             
             if serverManager.selectedFolderURL != nil {
                 if serverManager.isServerRunning {

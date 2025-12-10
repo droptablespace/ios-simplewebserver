@@ -10,17 +10,27 @@ import Combine
 import FlyingFox
 import UIKit
 import Zip
+import Photos
+
+enum SourceType {
+    case folder
+    case photoGallery
+}
 
 @MainActor
 class WebServerManager: ObservableObject {
     @Published var selectedFolderURL: URL?
+    @Published var sourceType: SourceType = .folder
     @Published var isServerRunning = false
     @Published var errorMessage: String?
     @Published var serverURL: String?
     @Published var networkAddresses: [String] = []
+    @Published var photoLibraryAuthorized = false
     
     private var server: HTTPServer?
     let port: UInt16 = 8080
+    private var photoAssets: [PHAsset] = []
+    private var assetCache: [String: Data] = [:]
     
     // HTML Templates
     private var folderTemplate: String = ""
@@ -63,12 +73,63 @@ class WebServerManager: ObservableObject {
         }
         
         selectedFolderURL = url
+        sourceType = .folder
         errorMessage = nil
     }
     
+    func requestPhotoLibraryAccess() async {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        
+        switch status {
+        case .authorized, .limited:
+            photoLibraryAuthorized = true
+            await fetchPhotoAssets()
+            sourceType = .photoGallery
+            selectedFolderURL = URL(fileURLWithPath: "Photos")
+            errorMessage = nil
+        case .notDetermined:
+            let newStatus = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+            if newStatus == .authorized || newStatus == .limited {
+                photoLibraryAuthorized = true
+                await fetchPhotoAssets()
+                sourceType = .photoGallery
+                selectedFolderURL = URL(fileURLWithPath: "Photos")
+                errorMessage = nil
+            } else {
+                photoLibraryAuthorized = false
+                errorMessage = "Photo library access denied"
+            }
+        case .denied, .restricted:
+            photoLibraryAuthorized = false
+            errorMessage = "Photo library access denied. Please enable in Settings."
+        @unknown default:
+            photoLibraryAuthorized = false
+            errorMessage = "Unknown photo library authorization status"
+        }
+    }
+    
+    private func fetchPhotoAssets() async {
+        let fetchOptions = PHFetchOptions()
+        fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        
+        // Fetch both images and videos
+        let fetchResult = PHAsset.fetchAssets(with: fetchOptions)
+        
+        var assets: [PHAsset] = []
+        fetchResult.enumerateObjects { asset, _, _ in
+            // Only include images and videos
+            if asset.mediaType == .image || asset.mediaType == .video {
+                assets.append(asset)
+            }
+        }
+        
+        photoAssets = assets
+        assetCache.removeAll()
+    }
+    
     func startServer() async {
-        guard let folderURL = selectedFolderURL else {
-            errorMessage = "No folder selected"
+        guard selectedFolderURL != nil else {
+            errorMessage = "No source selected"
             return
         }
         
@@ -76,46 +137,68 @@ class WebServerManager: ObservableObject {
             let server = HTTPServer(port: port)
             self.server = server
             
-            // Root route - browse folder structure
-            await server.appendRoute("GET /") { [weak self] request in
-                guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
-                return await self.handleBrowseRequest(path: "", request: request)
-            }
-            
-            // Browse route for folders
-            await server.appendRoute("GET /browse/*") { [weak self] request in
-                guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
-                let path = String(request.path.dropFirst("/browse/".count))
-                return await self.handleBrowseRequest(path: path, request: request)
-            }
-            
-            // File serving route
-            await server.appendRoute("GET /file/*") { [weak self] request in
-                guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
-                let path = String(request.path.dropFirst("/file/".count))
-                return await self.handleFileRequest(path: path, request: request)
-            }
-            
-            // Image gallery route
-            await server.appendRoute("GET /gallery/*") { [weak self] request in
-                guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
-                let path = String(request.path.dropFirst("/gallery/".count))
-                let sortBy = request.query["sort"] ?? "name"
-                return await self.handleGalleryRequest(path: path, sortBy: sortBy)
-            }
-            
-            // Download file route
-            await server.appendRoute("GET /download/*") { [weak self] request in
-                guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
-                let path = String(request.path.dropFirst("/download/".count))
-                return await self.handleDownloadRequest(path: path)
-            }
-            
-            // Download folder as zip route
-            await server.appendRoute("GET /download-zip/*") { [weak self] request in
-                guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
-                let path = String(request.path.dropFirst("/download-zip/".count))
-                return await self.handleDownloadZipRequest(path: path)
+            if sourceType == .photoGallery {
+                // Photo gallery routes
+                await server.appendRoute("GET /") { [weak self] request in
+                    guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    return await self.handlePhotoGalleryRoot(sortBy: request.query["sort"] ?? "date")
+                }
+                
+                // Photo asset serving route
+                await server.appendRoute("GET /photo/*") { [weak self] request in
+                    guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    let assetId = String(request.path.dropFirst("/photo/".count))
+                    return await self.handlePhotoAssetRequest(assetId: assetId)
+                }
+                
+                // Video asset serving route
+                await server.appendRoute("GET /video/*") { [weak self] request in
+                    guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    let assetId = String(request.path.dropFirst("/video/".count))
+                    return await self.handleVideoAssetRequest(assetId: assetId, request: request)
+                }
+            } else {
+                // Folder routes
+                await server.appendRoute("GET /") { [weak self] request in
+                    guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    return await self.handleBrowseRequest(path: "", request: request)
+                }
+                
+                // Browse route for folders
+                await server.appendRoute("GET /browse/*") { [weak self] request in
+                    guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    let path = String(request.path.dropFirst("/browse/".count))
+                    return await self.handleBrowseRequest(path: path, request: request)
+                }
+                
+                // File serving route
+                await server.appendRoute("GET /file/*") { [weak self] request in
+                    guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    let path = String(request.path.dropFirst("/file/".count))
+                    return await self.handleFileRequest(path: path, request: request)
+                }
+                
+                // Image gallery route
+                await server.appendRoute("GET /gallery/*") { [weak self] request in
+                    guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    let path = String(request.path.dropFirst("/gallery/".count))
+                    let sortBy = request.query["sort"] ?? "name"
+                    return await self.handleGalleryRequest(path: path, sortBy: sortBy)
+                }
+                
+                // Download file route
+                await server.appendRoute("GET /download/*") { [weak self] request in
+                    guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    let path = String(request.path.dropFirst("/download/".count))
+                    return await self.handleDownloadRequest(path: path)
+                }
+                
+                // Download folder as zip route
+                await server.appendRoute("GET /download-zip/*") { [weak self] request in
+                    guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    let path = String(request.path.dropFirst("/download-zip/".count))
+                    return await self.handleDownloadZipRequest(path: path)
+                }
             }
             
             Task {
@@ -640,41 +723,97 @@ class WebServerManager: ObservableObject {
     
     private func generateGalleryHTML(for url: URL, relativePath: String, sortBy: String) -> String {
         let fileManager = FileManager.default
-        var images: [(name: String, path: String, modificationDate: Date?, size: Int64)] = []
+        var mediaItems: [(name: String, path: String, modificationDate: Date?, size: Int64, isVideo: Bool)] = []
         
         do {
             let contents = try fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey, .fileSizeKey])
             
             for itemURL in contents {
                 let isDirectory = (try? itemURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-                if !isDirectory && isImageFile(itemURL.lastPathComponent) {
+                if !isDirectory && (isImageFile(itemURL.lastPathComponent) || isVideoFile(itemURL.lastPathComponent)) {
                     let modDate = (try? itemURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
                     let fileSize = (try? itemURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
                     let itemPath = relativePath.isEmpty ? itemURL.lastPathComponent : "\(relativePath)/\(itemURL.lastPathComponent)"
-                    images.append((name: itemURL.lastPathComponent, path: itemPath, modificationDate: modDate, size: Int64(fileSize)))
+                    let isVideo = isVideoFile(itemURL.lastPathComponent)
+                    mediaItems.append((name: itemURL.lastPathComponent, path: itemPath, modificationDate: modDate, size: Int64(fileSize), isVideo: isVideo))
                 }
             }
             
-            // Sort images with natural sorting for "name"
+            // Sort media items with natural sorting for "name"
             switch sortBy {
             case "date":
-                images.sort { ($0.modificationDate ?? Date.distantPast) > ($1.modificationDate ?? Date.distantPast) }
+                mediaItems.sort { ($0.modificationDate ?? Date.distantPast) > ($1.modificationDate ?? Date.distantPast) }
             case "size":
-                images.sort { $0.size > $1.size }
+                mediaItems.sort { $0.size > $1.size }
             default: // "name"
-                images = naturalSortImages(images)
+                mediaItems = naturalSortMediaItems(mediaItems)
             }
         } catch {
             return generateErrorHTML("Error reading directory: \(error.localizedDescription)")
         }
         
+        // Use template if available
+        if !galleryTemplate.isEmpty {
+            // Generate controls
+            let controls = """
+            <a href='/browse/\(encodePathForURL(relativePath))' class='back-btn'>← Back to Folder</a>
+            <a href='?sort=name' class='sort-btn \(sortBy == "name" ? "active" : "")'>Sort by Name</a>
+            <a href='?sort=date' class='sort-btn \(sortBy == "date" ? "active" : "")'>Sort by Date</a>
+            <a href='?sort=size' class='sort-btn \(sortBy == "size" ? "active" : "")'>Sort by Size</a>
+            """
+            
+            // Generate gallery items HTML
+            var itemsHTML = ""
+            if mediaItems.isEmpty {
+                itemsHTML = "<p style='grid-column: 1/-1; text-align: center;'>No images or videos found in this folder</p>"
+            } else {
+                for (index, item) in mediaItems.enumerated() {
+                    let encodedPath = encodePathForURL(item.path)
+                    let videoClass = item.isVideo ? " video" : ""
+                    
+                    if item.isVideo {
+                        // For videos, show thumbnail (first frame) using video element
+                        itemsHTML += """
+                        <div class='gallery-item\(videoClass)' onclick='openMedia(\(index))'>
+                            <img src='/file/\(encodedPath)#t=0.1' alt='\(item.name)' loading='lazy'>
+                            <div class='image-name'>\(item.name)</div>
+                        </div>
+                        """
+                    } else {
+                        itemsHTML += """
+                        <div class='gallery-item' onclick='openMedia(\(index))'>
+                            <img src='/file/\(encodedPath)' alt='\(item.name)' loading='lazy'>
+                            <div class='image-name'>\(item.name)</div>
+                        </div>
+                        """
+                    }
+                }
+            }
+            
+            // Generate media items JSON
+            var mediaJSON = ""
+            for item in mediaItems {
+                let encodedPath = encodePathForURL(item.path)
+                let type = item.isVideo ? "video" : "image"
+                let mimeType = mimeTypeForPath(item.name)
+                let videoPath = item.isVideo ? "/file/\(encodedPath)?raw=true" : "/file/\(encodedPath)"
+                mediaJSON += "{type: '\(type)', path: '\(videoPath)', mimeType: '\(mimeType)'},\n"
+            }
+            
+            return galleryTemplate
+                .replacingOccurrences(of: "{{CONTROLS}}", with: controls)
+                .replacingOccurrences(of: "{{GALLERY_ITEMS}}", with: itemsHTML)
+                .replacingOccurrences(of: "{{MEDIA_ITEMS}}", with: mediaJSON)
+        }
+        
+        // Fallback inline HTML (in case template loading fails)
         var html = """
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Image Gallery</title>
+            <title>Media Gallery</title>
             <style>
                 body {
                     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
@@ -753,6 +892,17 @@ class WebServerManager: ObservableObject {
                 .gallery-item:hover img {
                     transform: scale(1.1);
                 }
+                .gallery-item.video::after {
+                    content: '▶';
+                    position: absolute;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    font-size: 60px;
+                    color: white;
+                    text-shadow: 0 2px 8px rgba(0,0,0,0.7);
+                    pointer-events: none;
+                }
                 .image-name {
                     position: absolute;
                     bottom: 0;
@@ -782,6 +932,35 @@ class WebServerManager: ObservableObject {
                     max-width: 90%;
                     max-height: 90%;
                     object-fit: contain;
+                }
+                .video-dialog {
+                    display: none;
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 100%;
+                    background: rgba(0,0,0,0.95);
+                    z-index: 1001;
+                    align-items: center;
+                    justify-content: center;
+                }
+                .video-dialog.active {
+                    display: flex;
+                }
+                .video-dialog video {
+                    max-width: 90%;
+                    max-height: 90%;
+                    border-radius: 8px;
+                }
+                .video-dialog-close {
+                    position: absolute;
+                    top: 20px;
+                    right: 30px;
+                    font-size: 40px;
+                    color: white;
+                    cursor: pointer;
+                    z-index: 1002;
                 }
                 .lightbox-close {
                     position: absolute;
@@ -818,15 +997,16 @@ class WebServerManager: ObservableObject {
             <div class='gallery'>
         """
         
-        if images.isEmpty {
-            html += "<p style='grid-column: 1/-1; text-align: center;'>No images found in this folder</p>"
+        if mediaItems.isEmpty {
+            html += "<p style='grid-column: 1/-1; text-align: center;'>No images or videos found in this folder</p>"
         } else {
-            for (index, image) in images.enumerated() {
-                let encodedPath = encodePathForURL(image.path)
+            for (index, item) in mediaItems.enumerated() {
+                let encodedPath = encodePathForURL(item.path)
+                let videoClass = item.isVideo ? " video" : ""
                 html += """
-                <div class='gallery-item' onclick='openLightbox(\(index))'>
-                    <img src='/file/\(encodedPath)' alt='\(image.name)' loading='lazy'>
-                    <div class='image-name'>\(image.name)</div>
+                <div class='gallery-item\(videoClass)' onclick='openMedia(\(index))'>
+                    <img src='/file/\(encodedPath)' alt='\(item.name)' loading='lazy'>
+                    <div class='image-name'>\(item.name)</div>
                 </div>
                 """
             }
@@ -837,42 +1017,92 @@ class WebServerManager: ObservableObject {
             <div class='lightbox' id='lightbox'>
                 <span class='lightbox-close' onclick='closeLightbox()'>×</span>
                 <span class='lightbox-nav lightbox-prev' onclick='event.stopPropagation(); changeImage(-1)'>‹</span>
-                <img id='lightbox-img' src='' alt=''>
+                <img id='lightbox-img' src='' alt='' loading='lazy'>
                 <span class='lightbox-nav lightbox-next' onclick='event.stopPropagation(); changeImage(1)'>›</span>
             </div>
+            <div class='video-dialog' id='video-dialog' onclick='closeVideoDialog()'>
+                <span class='video-dialog-close' onclick='closeVideoDialog()'>×</span>
+                <video id='video-player' controls onclick='event.stopPropagation()'>
+                    <source id='video-source' src='' type=''>
+                    Your browser does not support the video tag.
+                </video>
+            </div>
             <script>
-                const images = [
+                const media = [
         """
         
-        for image in images {
-            let encodedPath = encodePathForURL(image.path)
-            html += "'/file/\(encodedPath)',\n"
+        for item in mediaItems {
+            let encodedPath = encodePathForURL(item.path)
+            let type = item.isVideo ? "video" : "image"
+            let mimeType = mimeTypeForPath(item.name)
+            let path = item.isVideo ? "/file/\(encodedPath)?raw=true" : "/file/\(encodedPath)"
+            html += "{type: '\(type)', path: '\(path)', mimeType: '\(mimeType)'},\n"
         }
         
         html += """
                 ];
                 let currentIndex = 0;
                 
-                function openLightbox(index) {
+                function openMedia(index) {
                     currentIndex = index;
-                    document.getElementById('lightbox-img').src = images[index];
-                    document.getElementById('lightbox').classList.add('active');
+                    const item = media[index];
+                    
+                    if (item.type === 'image') {
+                        document.getElementById('lightbox-img').src = item.path;
+                        document.getElementById('lightbox').classList.add('active');
+                    } else if (item.type === 'video') {
+                        const videoPlayer = document.getElementById('video-player');
+                        const videoSource = document.getElementById('video-source');
+                        videoSource.src = item.path;
+                        videoSource.type = item.mimeType || 'video/mp4';
+                        videoPlayer.load();
+                        document.getElementById('video-dialog').classList.add('active');
+                    }
                 }
                 
                 function closeLightbox() {
                     document.getElementById('lightbox').classList.remove('active');
                 }
                 
+                function closeVideoDialog() {
+                    const dialog = document.getElementById('video-dialog');
+                    const videoPlayer = document.getElementById('video-player');
+                    videoPlayer.pause();
+                    videoPlayer.currentTime = 0;
+                    dialog.classList.remove('active');
+                }
+                
                 function changeImage(direction) {
-                    currentIndex = (currentIndex + direction + images.length) % images.length;
-                    document.getElementById('lightbox-img').src = images[currentIndex];
+                    let newIndex = currentIndex;
+                    let found = false;
+                    
+                    // Find next image (skip videos)
+                    for (let i = 0; i < media.length; i++) {
+                        newIndex = (newIndex + direction + media.length) % media.length;
+                        if (media[newIndex].type === 'image') {
+                            found = true;
+                            break;
+                        }
+                    }
+                    
+                    if (found) {
+                        currentIndex = newIndex;
+                        document.getElementById('lightbox-img').src = media[currentIndex].path;
+                    }
                 }
                 
                 document.addEventListener('keydown', function(e) {
-                    if (document.getElementById('lightbox').classList.contains('active')) {
+                    const lightboxActive = document.getElementById('lightbox').classList.contains('active');
+                    const videoActive = document.getElementById('video-dialog').classList.contains('active');
+                    
+                    if (lightboxActive) {
                         if (e.key === 'Escape') closeLightbox();
                         if (e.key === 'ArrowLeft') changeImage(-1);
                         if (e.key === 'ArrowRight') changeImage(1);
+                    }
+                    
+                    if (videoActive && e.key === 'Escape') {
+                        closeVideoDialog();
                     }
                 });
                 
@@ -1328,5 +1558,511 @@ class WebServerManager: ObservableObject {
         return images.sorted { image1, image2 in
             return image1.name.localizedStandardCompare(image2.name) == .orderedAscending
         }
+    }
+    
+    private func naturalSortMediaItems(_ items: [(name: String, path: String, modificationDate: Date?, size: Int64, isVideo: Bool)]) -> [(name: String, path: String, modificationDate: Date?, size: Int64, isVideo: Bool)] {
+        return items.sorted { item1, item2 in
+            return item1.name.localizedStandardCompare(item2.name) == .orderedAscending
+        }
+    }
+    
+    // MARK: - Photo Gallery Handlers
+    
+    private func handlePhotoGalleryRoot(sortBy: String) async -> HTTPResponse {
+        let html = generatePhotoGalleryHTML(sortBy: sortBy)
+        return HTTPResponse(statusCode: .ok,
+                          headers: [.contentType: "text/html; charset=utf-8"],
+                          body: html.data(using: .utf8) ?? Data())
+    }
+    
+    private func handlePhotoAssetRequest(assetId: String) async -> HTTPResponse {
+        // Check cache first
+        if let cachedData = assetCache[assetId] {
+            return HTTPResponse(statusCode: .ok,
+                              headers: [
+                                .contentType: "image/jpeg",
+                                .contentLength: "\(cachedData.count)"
+                              ],
+                              body: cachedData)
+        }
+        
+        // Find asset by ID
+        guard let asset = photoAssets.first(where: { $0.localIdentifier == assetId }) else {
+            return HTTPResponse(statusCode: .notFound)
+        }
+        
+        // Fetch image data
+        return await withCheckedContinuation { continuation in
+            let imageManager = PHImageManager.default()
+            let options = PHImageRequestOptions()
+            options.isSynchronous = false
+            options.deliveryMode = .highQualityFormat
+            options.isNetworkAccessAllowed = true
+            
+            imageManager.requestImage(for: asset, targetSize: PHImageManagerMaximumSize, contentMode: .default, options: options) { [weak self] image, _ in
+                guard let self = self, let image = image, let data = image.jpegData(compressionQuality: 0.8) else {
+                    continuation.resume(returning: HTTPResponse(statusCode: .internalServerError))
+                    return
+                }
+                
+                // Cache the data
+                Task { @MainActor in
+                    self.assetCache[assetId] = data
+                }
+                
+                continuation.resume(returning: HTTPResponse(statusCode: .ok,
+                                  headers: [
+                                    .contentType: "image/jpeg",
+                                    .contentLength: "\(data.count)"
+                                  ],
+                                  body: data))
+            }
+        }
+    }
+    
+    private func handleVideoAssetRequest(assetId: String, request: HTTPRequest) async -> HTTPResponse {
+        // Find asset by ID
+        guard let asset = photoAssets.first(where: { $0.localIdentifier == assetId }) else {
+            return HTTPResponse(statusCode: .notFound)
+        }
+        
+        guard asset.mediaType == .video else {
+            return HTTPResponse(statusCode: .badRequest)
+        }
+        
+        // Request video data
+        return await withCheckedContinuation { continuation in
+            let videoManager = PHImageManager.default()
+            let options = PHVideoRequestOptions()
+            options.isNetworkAccessAllowed = true
+            options.deliveryMode = .highQualityFormat
+            
+            videoManager.requestAVAsset(forVideo: asset, options: options) { avAsset, _, _ in
+                guard let urlAsset = avAsset as? AVURLAsset else {
+                    continuation.resume(returning: HTTPResponse(statusCode: .internalServerError))
+                    return
+                }
+                
+                let videoURL = urlAsset.url
+                
+                do {
+                    let fileSize = try FileManager.default.attributesOfItem(atPath: videoURL.path)[.size] as? Int64 ?? 0
+                    
+                    // Check for Range header for video streaming
+                    if let rangeHeader = request.headers[.range] {
+                        // Parse Range header
+                        let rangeString = rangeHeader.replacingOccurrences(of: "bytes=", with: "")
+                        let rangeParts = rangeString.split(separator: "-")
+                        
+                        guard let startString = rangeParts.first else {
+                            continuation.resume(returning: HTTPResponse(statusCode: .badRequest))
+                            return
+                        }
+                        
+                        let start = Int64(startString) ?? 0
+                        let end: Int64
+                        
+                        if rangeParts.count > 1, let endString = rangeParts.last, !endString.isEmpty {
+                            end = Int64(endString) ?? (fileSize - 1)
+                        } else {
+                            end = fileSize - 1
+                        }
+                        
+                        let length = end - start + 1
+                        
+                        // Read the requested range
+                        guard let fileHandle = try? FileHandle(forReadingFrom: videoURL) else {
+                            continuation.resume(returning: HTTPResponse(statusCode: .internalServerError))
+                            return
+                        }
+                        
+                        defer { try? fileHandle.close() }
+                        
+                        do {
+                            try fileHandle.seek(toOffset: UInt64(start))
+                            guard let data = try? fileHandle.read(upToCount: Int(length)) else {
+                                continuation.resume(returning: HTTPResponse(statusCode: .internalServerError))
+                                return
+                            }
+                            
+                            continuation.resume(returning: HTTPResponse(
+                                statusCode: .partialContent,
+                                headers: [
+                                    .contentType: "video/mp4",
+                                    .contentRange: "bytes \(start)-\(end)/\(fileSize)",
+                                    .acceptRanges: "bytes",
+                                    .contentLength: "\(data.count)"
+                                ],
+                                body: data
+                            ))
+                        } catch {
+                            continuation.resume(returning: HTTPResponse(statusCode: .internalServerError))
+                        }
+                    } else {
+                        // No range request - send first chunk
+                        let chunkSize: Int64 = min(1024 * 1024, fileSize)
+                        
+                        guard let fileHandle = try? FileHandle(forReadingFrom: videoURL) else {
+                            continuation.resume(returning: HTTPResponse(statusCode: .internalServerError))
+                            return
+                        }
+                        
+                        defer { try? fileHandle.close() }
+                        
+                        guard let data = try? fileHandle.read(upToCount: Int(chunkSize)) else {
+                            continuation.resume(returning: HTTPResponse(statusCode: .internalServerError))
+                            return
+                        }
+                        
+                        continuation.resume(returning: HTTPResponse(
+                            statusCode: .partialContent,
+                            headers: [
+                                .contentType: "video/mp4",
+                                .contentRange: "bytes 0-\(chunkSize - 1)/\(fileSize)",
+                                .acceptRanges: "bytes",
+                                .contentLength: "\(data.count)"
+                            ],
+                            body: data
+                        ))
+                    }
+                } catch {
+                    continuation.resume(returning: HTTPResponse(statusCode: .internalServerError))
+                }
+            }
+        }
+    }
+    
+    private func generatePhotoGalleryHTML(sortBy: String) -> String {
+        var sortedAssets = photoAssets
+        
+        switch sortBy {
+        case "name":
+            // Sort by filename if available, otherwise by date
+            sortedAssets.sort { asset1, asset2 in
+                let name1 = (PHAssetResource.assetResources(for: asset1).first?.originalFilename ?? asset1.localIdentifier)
+                let name2 = (PHAssetResource.assetResources(for: asset2).first?.originalFilename ?? asset2.localIdentifier)
+                return name1.localizedStandardCompare(name2) == .orderedAscending
+            }
+        case "date":
+            sortedAssets.sort { ($0.creationDate ?? Date.distantPast) > ($1.creationDate ?? Date.distantPast) }
+        default:
+            // Default to date
+            sortedAssets.sort { ($0.creationDate ?? Date.distantPast) > ($1.creationDate ?? Date.distantPast) }
+        }
+        
+        var html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>iPhone Media Gallery</title>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                    margin: 0;
+                    padding: 20px;
+                    background-color: #000;
+                    color: #fff;
+                }
+                .header {
+                    max-width: 1400px;
+                    margin: 0 auto 20px;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    flex-wrap: wrap;
+                }
+                h1 {
+                    color: #fff;
+                    margin: 10px 0;
+                }
+                .info {
+                    color: #999;
+                    font-size: 0.9em;
+                }
+                .controls {
+                    display: flex;
+                    gap: 10px;
+                    align-items: center;
+                }
+                .sort-btn {
+                    padding: 8px 16px;
+                    background: #007AFF;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    cursor: pointer;
+                    text-decoration: none;
+                    font-size: 14px;
+                }
+                .sort-btn:hover {
+                    background: #0051D5;
+                }
+                .sort-btn.active {
+                    background: #34C759;
+                }
+                .gallery {
+                    max-width: 1400px;
+                    margin: 0 auto;
+                    display: grid;
+                    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+                    gap: 15px;
+                }
+                .gallery-item {
+                    position: relative;
+                    aspect-ratio: 1;
+                    overflow: hidden;
+                    border-radius: 8px;
+                    background: #222;
+                    cursor: pointer;
+                }
+                .gallery-item img {
+                    width: 100%;
+                    height: 100%;
+                    object-fit: cover;
+                    transition: transform 0.3s;
+                }
+                .gallery-item:hover img {
+                    transform: scale(1.1);
+                }
+                .gallery-item.video::after {
+                    content: '▶';
+                    position: absolute;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    font-size: 60px;
+                    color: white;
+                    text-shadow: 0 2px 8px rgba(0,0,0,0.7);
+                    pointer-events: none;
+                }
+                .lightbox {
+                    display: none;
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 100%;
+                    background: rgba(0,0,0,0.95);
+                    z-index: 1000;
+                    align-items: center;
+                    justify-content: center;
+                }
+                .lightbox.active {
+                    display: flex;
+                }
+                .lightbox img {
+                    max-width: 90%;
+                    max-height: 90%;
+                    object-fit: contain;
+                }
+                .video-dialog {
+                    display: none;
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 100%;
+                    background: rgba(0,0,0,0.95);
+                    z-index: 1001;
+                    align-items: center;
+                    justify-content: center;
+                }
+                .video-dialog.active {
+                    display: flex;
+                }
+                .video-dialog video {
+                    max-width: 90%;
+                    max-height: 90%;
+                    border-radius: 8px;
+                }
+                .video-dialog-close {
+                    position: absolute;
+                    top: 20px;
+                    right: 30px;
+                    font-size: 40px;
+                    color: white;
+                    cursor: pointer;
+                    z-index: 1002;
+                }
+                .lightbox-close {
+                    position: absolute;
+                    top: 20px;
+                    right: 30px;
+                    font-size: 40px;
+                    color: white;
+                    cursor: pointer;
+                }
+                .lightbox-nav {
+                    position: absolute;
+                    top: 50%;
+                    transform: translateY(-50%);
+                    font-size: 50px;
+                    color: white;
+                    cursor: pointer;
+                    padding: 20px;
+                    user-select: none;
+                }
+                .lightbox-prev { left: 20px; }
+                .lightbox-next { right: 20px; }
+            </style>
+        </head>
+        <body>
+            <div class='header'>
+                <div>
+                    <h1>📱 iPhone Media Gallery</h1>
+                    <div class='info'>\(photoAssets.count) items</div>
+                </div>
+                <div class='controls'>
+                    <a href='?sort=date' class='sort-btn \(sortBy == "date" ? "active" : "")'>Sort by Date</a>
+                    <a href='?sort=name' class='sort-btn \(sortBy == "name" ? "active" : "")'>Sort by Name</a>
+                </div>
+            </div>
+            <div class='gallery'>
+        """
+        
+        if sortedAssets.isEmpty {
+            html += "<p style='grid-column: 1/-1; text-align: center;'>No media found</p>"
+        } else {
+            for (index, asset) in sortedAssets.enumerated() {
+                let assetId = asset.localIdentifier
+                let isVideo = asset.mediaType == .video
+                let videoClass = isVideo ? " video" : ""
+                let imageUrl = isVideo ? "/photo/\(assetId)" : "/photo/\(assetId)"
+                
+                html += """
+                <div class='gallery-item\(videoClass)' onclick='openMedia(\(index))'>
+                    <img src='\(imageUrl)' alt='Item \(index + 1)' loading='lazy'>
+                </div>
+                """
+            }
+        }
+        
+        html += """
+            </div>
+            <div class='lightbox' id='lightbox'>
+                <span class='lightbox-close' onclick='closeLightbox()'>×</span>
+                <span class='lightbox-nav lightbox-prev' onclick='event.stopPropagation(); changeImage(-1)'>‹</span>
+                <img id='lightbox-img' src='' alt='' loading='lazy'>
+                <span class='lightbox-nav lightbox-next' onclick='event.stopPropagation(); changeImage(1)'>›</span>
+            </div>
+            <div class='video-dialog' id='video-dialog' onclick='closeVideoDialog()'>
+                <span class='video-dialog-close' onclick='closeVideoDialog()'>×</span>
+                <video id='video-player' controls onclick='event.stopPropagation()'>
+                    <source id='video-source' src='' type='video/mp4'>
+                    Your browser does not support the video tag.
+                </video>
+            </div>
+            <script>
+                const media = [
+        """
+        
+        for asset in sortedAssets {
+            let isVideo = asset.mediaType == .video
+            let type = isVideo ? "video" : "image"
+            let imagePath = "/photo/\(asset.localIdentifier)"
+            let videoPath = "/video/\(asset.localIdentifier)"
+            html += "{type: '\(type)', imagePath: '\(imagePath)', videoPath: '\(videoPath)'},\n"
+        }
+        
+        html += """
+                ];
+                let currentIndex = 0;
+                
+                function openMedia(index) {
+                    currentIndex = index;
+                    const item = media[index];
+                    
+                    if (item.type === 'image') {
+                        document.getElementById('lightbox-img').src = item.imagePath;
+                        document.getElementById('lightbox').classList.add('active');
+                    } else if (item.type === 'video') {
+                        const videoPlayer = document.getElementById('video-player');
+                        const videoSource = document.getElementById('video-source');
+                        videoSource.src = item.videoPath;
+                        videoPlayer.load();
+                        document.getElementById('video-dialog').classList.add('active');
+                    }
+                }
+                
+                function closeLightbox() {
+                    document.getElementById('lightbox').classList.remove('active');
+                }
+                
+                function closeVideoDialog() {
+                    const dialog = document.getElementById('video-dialog');
+                    const videoPlayer = document.getElementById('video-player');
+                    videoPlayer.pause();
+                    videoPlayer.currentTime = 0;
+                    dialog.classList.remove('active');
+                }
+                
+                function changeImage(direction) {
+                    let newIndex = currentIndex;
+                    let found = false;
+                    
+                    // Find next image (skip videos)
+                    for (let i = 0; i < media.length; i++) {
+                        newIndex = (newIndex + direction + media.length) % media.length;
+                        if (media[newIndex].type === 'image') {
+                            found = true;
+                            break;
+                        }
+                    }
+                    
+                    if (found) {
+                        currentIndex = newIndex;
+                        document.getElementById('lightbox-img').src = media[currentIndex].imagePath;
+                    }
+                }
+                
+                document.addEventListener('keydown', function(e) {
+                    const lightboxActive = document.getElementById('lightbox').classList.contains('active');
+                    const videoActive = document.getElementById('video-dialog').classList.contains('active');
+                    
+                    if (lightboxActive) {
+                        if (e.key === 'Escape') closeLightbox();
+                        if (e.key === 'ArrowLeft') changeImage(-1);
+                        if (e.key === 'ArrowRight') changeImage(1);
+                    }
+                    
+                    if (videoActive && e.key === 'Escape') {
+                        closeVideoDialog();
+                    }
+                });
+                
+                // Touch swipe support
+                let touchStartX = 0;
+                let touchEndX = 0;
+                const lightboxImg = document.getElementById('lightbox-img');
+                
+                lightboxImg.addEventListener('touchstart', function(e) {
+                    touchStartX = e.changedTouches[0].screenX;
+                }, false);
+                
+                lightboxImg.addEventListener('touchend', function(e) {
+                    touchEndX = e.changedTouches[0].screenX;
+                    handleSwipe();
+                }, false);
+                
+                function handleSwipe() {
+                    const swipeThreshold = 50;
+                    const diff = touchStartX - touchEndX;
+                    
+                    if (Math.abs(diff) > swipeThreshold) {
+                        if (diff > 0) {
+                            changeImage(1);
+                        } else {
+                            changeImage(-1);
+                        }
+                    }
+                }
+            </script>
+        </body>
+        </html>
+        """
+        
+        return html
     }
 }
