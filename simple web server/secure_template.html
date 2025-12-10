@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Protected Access Required</title>
+    <script src="/static/qrcode.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #f5f5f5;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 40px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            text-align: center;
+            max-width: 500px;
+            width: 100%;
+            color: #333;
+        }
+        h1 {
+            color: #007AFF;
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        #qrcode {
+            display: inline-block;
+            padding: 20px;
+            background: white;
+            border-radius: 10px;
+            margin: 20px 0;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .session-code {
+            font-family: 'Courier New', monospace;
+            font-size: 1.2em;
+            background: #f0f0f0;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+            word-break: break-all;
+        }
+        .instructions {
+            text-align: left;
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+        }
+        .instructions ol {
+            margin: 10px 0;
+            padding-left: 20px;
+        }
+        .instructions li {
+            margin: 8px 0;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            font-weight: 500;
+        }
+        .status.checking {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .status.authorized {
+            background: #d4edda;
+            color: #155724;
+        }
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #007AFF;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            vertical-align: middle;
+            margin-right: 10px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .lock-icon {
+            font-size: 3em;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="lock-icon">🔒</div>
+        <h1>Protected Access Required</h1>
+        <p class="subtitle">Scan this QR code with the server app to gain access</p>
+        
+        <div id="qrcode"></div>
+        
+        <div class="session-code">
+            Session Code: <strong id="code-display"></strong>
+        </div>
+        
+        <div class="instructions">
+            <strong>📱 How to connect:</strong>
+            <ol>
+                <li>Open the Simple Web Server app on the host device</li>
+                <li>Tap "Scan Client QR Code"</li>
+                <li>Scan this QR code</li>
+                <li>Wait for authorization (this page will auto-refresh)</li>
+            </ol>
+        </div>
+        
+        <div id="status" class="status checking">
+            <div class="spinner"></div>
+            Waiting for server authorization...
+        </div>
+    </div>
+    
+    <script>
+        // Generate random session code
+        function generateSessionCode() {
+            const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+            let code = '';
+            for (let i = 0; i < 16; i++) {
+                code += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            return code;
+        }
+        
+        // Get or create session code
+        function getSessionCode() {
+            let code = sessionStorage.getItem('session_code');
+            if (!code) {
+                code = generateSessionCode();
+                sessionStorage.setItem('session_code', code);
+            }
+            return code;
+        }
+        
+        // Set session code cookie
+        function setSessionCookie(code) {
+            document.cookie = `session_code=${code}; path=/; max-age=86400`; // 24 hours
+        }
+        
+        const sessionCode = getSessionCode();
+        setSessionCookie(sessionCode);
+        
+        // Display session code
+        document.getElementById('code-display').textContent = sessionCode;
+        
+        // Generate QR code
+        new QRCode(document.getElementById('qrcode'), {
+            text: sessionCode,
+            width: 256,
+            height: 256,
+            colorDark: '#007AFF',
+            colorLight: '#ffffff',
+            correctLevel: QRCode.CorrectLevel.H
+        });
+        
+        // Check authorization status
+        async function checkAuthorization() {
+            try {
+                const response = await fetch(`/check-session?session_code=${sessionCode}`);
+                const data = await response.json();
+                
+                if (data.valid) {
+                    document.getElementById('status').className = 'status authorized';
+                    document.getElementById('status').innerHTML = '✅ Authorization successful! Redirecting...';
+                    setTimeout(() => {
+                        window.location.href = '/?session_code=' + sessionCode;
+                    }, 1500);
+                    return true;
+                }
+            } catch (error) {
+                console.error('Error checking authorization:', error);
+            }
+            return false;
+        }
+        
+        // Poll for authorization
+        let pollInterval = setInterval(async () => {
+            const authorized = await checkAuthorization();
+            if (authorized) {
+                clearInterval(pollInterval);
+            }
+        }, 2000); // Check every 2 seconds
+        
+        // Initial check
+        checkAuthorization();
+    </script>
+</body>
+</html>

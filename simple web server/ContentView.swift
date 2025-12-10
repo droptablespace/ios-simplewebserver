@@ -7,6 +7,8 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import CodeScanner
+import AVFoundation
 #if os(iOS)
 import UIKit
 #elseif os(macOS)
@@ -17,6 +19,8 @@ struct ContentView: View {
     @StateObject private var serverManager = WebServerManager()
     @State private var showFolderPicker = false
     @State private var showCopiedToast = false
+    @State private var showQRScanner = false
+    @State private var secureMode = false
     @Environment(\.scenePhase) private var scenePhase
     
     var body: some View {
@@ -87,11 +91,78 @@ struct ContentView: View {
             }
             
             if serverManager.selectedFolderURL != nil {
+                // Secure Mode Toggle (only show when folder/gallery is selected but server not running)
+                if !serverManager.isServerRunning {
+                    Toggle(isOn: $secureMode) {
+                        HStack {
+                            Image(systemName: secureMode ? "lock.fill" : "lock.open.fill")
+                                .foregroundColor(secureMode ? .green : .gray)
+                            Text("Protected Mode")
+                                .font(.headline)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .onChange(of: secureMode) { oldValue, newValue in
+                        serverManager.secureMode = newValue
+                    }
+                }
+                
                 if serverManager.isServerRunning {
                     VStack(spacing: 12) {
-                        Text("Server Running")
-                            .font(.headline)
-                            .foregroundColor(.green)
+                        HStack {
+                            Text("Server Running")
+                                .font(.headline)
+                                .foregroundColor(.green)
+                            
+                            if serverManager.secureMode {
+                                Image(systemName: "lock.shield.fill")
+                                    .foregroundColor(.green)
+                                Text("Protected")
+                                    .font(.caption)
+                                    .foregroundColor(.green)
+                            }
+                        }
+                        
+                        // Secure mode instructions
+                        if serverManager.secureMode {
+                            VStack(spacing: 10) {
+                                Text("🔐 Protected Mode Active")
+                                    .font(.headline)
+                                    .foregroundColor(.green)
+                                
+                                Text("To connect:")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                
+                                Text("1. Open the server URL in browser\n2. Scan QR code with this app\n3. Confirm on webpage")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+                                
+                                Button(action: {
+                                    showQRScanner = true
+                                }) {
+                                    Label("Scan Client QR Code", systemImage: "qrcode.viewfinder")
+                                        .frame(maxWidth: .infinity)
+                                        .padding()
+                                        .background(Color.green)
+                                        .foregroundColor(.white)
+                                        .cornerRadius(10)
+                                }
+                                .padding(.horizontal)
+                                
+                                if !serverManager.authorizedCodes.isEmpty {
+                                    Text("Authorized clients: \(serverManager.authorizedCodes.count)")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .padding()
+                            .background(Color.green.opacity(0.1))
+                            .cornerRadius(8)
+                            .padding(.horizontal)
+                        }
                         
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Access from this device:")
@@ -218,6 +289,9 @@ struct ContentView: View {
                 serverManager.errorMessage = error.localizedDescription
             }
         }
+        .sheet(isPresented: $showQRScanner) {
+            QRScannerView(serverManager: serverManager, isPresented: $showQRScanner)
+        }
         .onChange(of: scenePhase) { oldPhase, newPhase in
             // When app becomes active, check if server still has access
             if newPhase == .active && oldPhase != .active {
@@ -260,6 +334,75 @@ struct ContentView: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - QR Scanner View
+struct QRScannerView: View {
+    @ObservedObject var serverManager: WebServerManager
+    @Binding var isPresented: Bool
+    @State private var scannedCode: String?
+    @State private var showError = false
+    
+    var body: some View {
+        NavigationView {
+            VStack {
+                if let code = scannedCode {
+                    VStack(spacing: 20) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 60))
+                            .foregroundColor(.green)
+                        
+                        Text("QR Code Scanned!")
+                            .font(.title)
+                        
+                        Text("Code: \(code)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        
+                        Button("Done") {
+                            isPresented = false
+                        }
+                        .padding()
+                        .background(Color.blue)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                    }
+                    .padding()
+                } else {
+                    CodeScannerView(codeTypes: [.qr], simulatedData: "test-session-12345") { response in
+                        switch response {
+                        case .success(let result):
+                            handleScan(result.string)
+                        case .failure(let error):
+                            print("Scanning failed: \(error.localizedDescription)")
+                            showError = true
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Scan QR Code")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") {
+                        isPresented = false
+                    }
+                }
+            }
+            .alert("Scanning Error", isPresented: $showError) {
+                Button("OK") {
+                    isPresented = false
+                }
+            } message: {
+                Text("Failed to scan QR code. Please try again.")
+            }
+        }
+    }
+    
+    private func handleScan(_ code: String) {
+        scannedCode = code
+        serverManager.authorizeCode(code)
     }
 }
 

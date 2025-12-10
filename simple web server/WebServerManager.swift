@@ -27,6 +27,8 @@ class WebServerManager: NSObject, ObservableObject {
     @Published var networkAddresses: [String] = []
     @Published var photoLibraryAuthorized = false
     @Published var bonjourHostname: String?
+    @Published var secureMode = false
+    @Published var authorizedCodes: Set<String> = []
     
     private var server: HTTPServer?
     let port: UInt16 = 8080
@@ -38,6 +40,7 @@ class WebServerManager: NSObject, ObservableObject {
     private var folderTemplate: String = ""
     private var galleryTemplate: String = ""
     private var errorTemplate: String = ""
+    private var secureTemplate: String = ""
     
     override init() {
         super.init()
@@ -55,7 +58,7 @@ class WebServerManager: NSObject, ObservableObject {
             forName: UIApplication.willResignActiveNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { _ in
             print("⚠️ App going to background - server may be suspended")
         }
         
@@ -114,6 +117,11 @@ class WebServerManager: NSObject, ObservableObject {
         if let errorURL = Bundle.main.url(forResource: "error_template", withExtension: "html"),
            let errorHTML = try? String(contentsOf: errorURL, encoding: .utf8) {
             errorTemplate = errorHTML
+        }
+        
+        if let secureURL = Bundle.main.url(forResource: "secure_template", withExtension: "html"),
+           let secureHTML = try? String(contentsOf: secureURL, encoding: .utf8) {
+            secureTemplate = secureHTML
         }
     }
     
@@ -212,6 +220,21 @@ class WebServerManager: NSObject, ObservableObject {
             let newServer = HTTPServer(port: port)
             self.server = newServer
             
+            // Capture secure mode state for route handlers
+            let isSecure = self.secureMode
+            
+            // Secure page route (must come before other routes)
+            await newServer.appendRoute("GET /secure") { [weak self] request in
+                guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                return await self.handleSecurePageRequest()
+            }
+            
+            // Check session code endpoint
+            await newServer.appendRoute("GET /check-session") { [weak self] request in
+                guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                return await self.handleCheckSessionRequest(request: request)
+            }
+            
             // Static file route for libraries
             await newServer.appendRoute("GET /static/*") { [weak self] request in
                 guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
@@ -223,12 +246,30 @@ class WebServerManager: NSObject, ObservableObject {
                 // Photo gallery routes
                 await newServer.appendRoute("GET /") { [weak self] request in
                     guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    
+                    // Check secure mode
+                    if isSecure {
+                        let isValid = await self.validateSessionCode(from: request)
+                        if !isValid {
+                            return await self.handleSecurePageRequest()
+                        }
+                    }
+                    
                     return await self.handlePhotoGalleryRoot(sortBy: request.query["sort"] ?? "date")
                 }
                 
                 // Photo asset serving route
                 await newServer.appendRoute("GET /photo/*") { [weak self] request in
                     guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    
+                    // Check secure mode
+                    if isSecure {
+                        let isValid = await self.validateSessionCode(from: request)
+                        if !isValid {
+                            return HTTPResponse(statusCode: .seeOther, headers: [.location: "/secure"])
+                        }
+                    }
+                    
                     let assetId = String(request.path.dropFirst("/photo/".count))
                     return await self.handlePhotoAssetRequest(assetId: assetId)
                 }
@@ -236,6 +277,15 @@ class WebServerManager: NSObject, ObservableObject {
                 // Video asset serving route
                 await newServer.appendRoute("GET /video/*") { [weak self] request in
                     guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    
+                    // Check secure mode
+                    if isSecure {
+                        let isValid = await self.validateSessionCode(from: request)
+                        if !isValid {
+                            return HTTPResponse(statusCode: .seeOther, headers: [.location: "/secure"])
+                        }
+                    }
+                    
                     let assetId = String(request.path.dropFirst("/video/".count))
                     return await self.handleVideoAssetRequest(assetId: assetId, request: request)
                 }
@@ -243,12 +293,30 @@ class WebServerManager: NSObject, ObservableObject {
                 // Folder routes
                 await newServer.appendRoute("GET /") { [weak self] request in
                     guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    
+                    // Check secure mode
+                    if isSecure {
+                        let isValid = await self.validateSessionCode(from: request)
+                        if !isValid {
+                            return await self.handleSecurePageRequest()
+                        }
+                    }
+                    
                     return await self.handleBrowseRequest(path: "", request: request)
                 }
                 
                 // Browse route for folders
                 await newServer.appendRoute("GET /browse/*") { [weak self] request in
                     guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    
+                    // Check secure mode
+                    if isSecure {
+                        let isValid = await self.validateSessionCode(from: request)
+                        if !isValid {
+                            return HTTPResponse(statusCode: .seeOther, headers: [.location: "/secure"])
+                        }
+                    }
+                    
                     let path = String(request.path.dropFirst("/browse/".count))
                     return await self.handleBrowseRequest(path: path, request: request)
                 }
@@ -256,6 +324,15 @@ class WebServerManager: NSObject, ObservableObject {
                 // File serving route
                 await newServer.appendRoute("GET /file/*") { [weak self] request in
                     guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    
+                    // Check secure mode
+                    if isSecure {
+                        let isValid = await self.validateSessionCode(from: request)
+                        if !isValid {
+                            return HTTPResponse(statusCode: .seeOther, headers: [.location: "/secure"])
+                        }
+                    }
+                    
                     let path = String(request.path.dropFirst("/file/".count))
                     return await self.handleFileRequest(path: path, request: request)
                 }
@@ -263,6 +340,15 @@ class WebServerManager: NSObject, ObservableObject {
                 // Image gallery route
                 await newServer.appendRoute("GET /gallery/*") { [weak self] request in
                     guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    
+                    // Check secure mode
+                    if isSecure {
+                        let isValid = await self.validateSessionCode(from: request)
+                        if !isValid {
+                            return HTTPResponse(statusCode: .seeOther, headers: [.location: "/secure"])
+                        }
+                    }
+                    
                     let path = String(request.path.dropFirst("/gallery/".count))
                     let sortBy = request.query["sort"] ?? "name"
                     return await self.handleGalleryRequest(path: path, sortBy: sortBy)
@@ -271,6 +357,15 @@ class WebServerManager: NSObject, ObservableObject {
                 // Download file route
                 await newServer.appendRoute("GET /download/*") { [weak self] request in
                     guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    
+                    // Check secure mode
+                    if isSecure {
+                        let isValid = await self.validateSessionCode(from: request)
+                        if !isValid {
+                            return HTTPResponse(statusCode: .seeOther, headers: [.location: "/secure"])
+                        }
+                    }
+                    
                     let path = String(request.path.dropFirst("/download/".count))
                     return await self.handleDownloadRequest(path: path)
                 }
@@ -278,6 +373,15 @@ class WebServerManager: NSObject, ObservableObject {
                 // Download folder as zip route
                 await newServer.appendRoute("GET /download-zip/*") { [weak self] request in
                     guard let self = self else { return HTTPResponse(statusCode: .internalServerError) }
+                    
+                    // Check secure mode
+                    if isSecure {
+                        let isValid = await self.validateSessionCode(from: request)
+                        if !isValid {
+                            return HTTPResponse(statusCode: .seeOther, headers: [.location: "/secure"])
+                        }
+                    }
+                    
                     let path = String(request.path.dropFirst("/download-zip/".count))
                     return await self.handleDownloadZipRequest(path: path)
                 }
@@ -287,7 +391,7 @@ class WebServerManager: NSObject, ObservableObject {
             // Keep track of the task so we can monitor it
             serverTask = Task {
                 do {
-                    try await newServer.start()
+                    try await newServer.run()
                 } catch {
                     await MainActor.run {
                         // Check if this is an expected error (socket closed, app background, etc.)
@@ -364,6 +468,9 @@ class WebServerManager: NSObject, ObservableObject {
         serverURL = nil
         networkAddresses = []
         bonjourHostname = nil
+        
+        // Clear authorized codes when server stops
+        authorizedCodes.removeAll()
         
         // Re-enable idle timer (allow screen to lock)
         UIApplication.shared.isIdleTimerDisabled = false
@@ -458,6 +565,95 @@ class WebServerManager: NSObject, ObservableObject {
         }
     }
     
+    // MARK: - Security Methods
+    
+    func authorizeCode(_ code: String) {
+        authorizedCodes.insert(code)
+        print("✅ Authorized code: \(code)")
+    }
+    
+    private func validateSessionCode(from request: HTTPRequest) async -> Bool {
+        // Check if session code is in cookies
+        if let cookies = request.headers[HTTPHeader("Cookie")] {
+            let cookiePairs = cookies.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }
+            for pair in cookiePairs {
+                let parts = pair.split(separator: "=", maxSplits: 1)
+                if parts.count == 2 && parts[0] == "session_code" {
+                    let code = String(parts[1])
+                    return authorizedCodes.contains(code)
+                }
+            }
+        }
+        
+        // Check if session code is in query parameters
+        if let code = request.query["session_code"] {
+            return authorizedCodes.contains(code)
+        }
+        
+        return false
+    }
+    
+    private func handleSecurePageRequest() async -> HTTPResponse {
+        let html = generateSecurePageHTML()
+        return HTTPResponse(statusCode: .ok,
+                          headers: [.contentType: "text/html; charset=utf-8"],
+                          body: html.data(using: .utf8) ?? Data())
+    }
+    
+    private func handleCheckSessionRequest(request: HTTPRequest) async -> HTTPResponse {
+        let isValid = await validateSessionCode(from: request)
+        let json = """
+        {"valid": \(isValid)}
+        """
+        return HTTPResponse(statusCode: .ok,
+                          headers: [.contentType: "application/json"],
+                          body: json.data(using: .utf8) ?? Data())
+    }
+    
+    private func generateSecurePageHTML() -> String {
+        // Use template if available, otherwise fall back to basic HTML
+        if !secureTemplate.isEmpty {
+            return secureTemplate
+        }
+        
+        // Fallback HTML if template fails to load
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Secure Access Required</title>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    min-height: 100vh;
+                    margin: 0;
+                    background: #667eea;
+                    color: white;
+                }
+                .container {
+                    background: white;
+                    border-radius: 20px;
+                    padding: 40px;
+                    text-align: center;
+                    color: #333;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🔒 Protected Access Required</h1>
+                <p>This server requires authorization. Please ensure the secure_template.html file is properly loaded.</p>
+            </div>
+        </body>
+        </html>
+        """
+    }
+    
     // MARK: - Request Handlers
     
     private func handleBrowseRequest(path: String, request: HTTPRequest) async -> HTTPResponse {
@@ -522,43 +718,53 @@ class WebServerManager: NSObject, ObservableObject {
         }
         
         // Handle range requests for video streaming
+        let fileSize: Int64
         do {
-            let fileSize = try FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int64 ?? 0
-            let mimeType = mimeTypeForPath(fileURL.path)
-            
-            // Check for Range header
-            if let rangeHeader = request?.headers[.range] {
+            fileSize = try FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int64 ?? 0
+        } catch {
+            return HTTPResponse(statusCode: .internalServerError)
+        }
+        
+        let mimeType = mimeTypeForPath(fileURL.path)
+        
+        // Check for Range header
+        if let rangeHeader = request?.headers[.range] {
+            do {
                 return try handleRangeRequest(fileURL: fileURL, rangeHeader: rangeHeader, fileSize: fileSize, mimeType: mimeType)
+            } catch {
+                return HTTPResponse(statusCode: .internalServerError)
+            }
+        }
+        
+        // No range request - for video files, always use partial content to avoid loading entire file
+        if isVideoFile(fileURL.lastPathComponent) {
+            // For videos without a Range header, send the first chunk as a 206 Partial Content
+            // This allows the browser to get metadata and then request specific ranges
+            let chunkSize: Int64 = min(1024 * 1024, fileSize) // 1MB or file size, whichever is smaller
+            
+            guard let fileHandle = try? FileHandle(forReadingFrom: fileURL) else {
+                return HTTPResponse(statusCode: .internalServerError)
             }
             
-            // No range request - for video files, always use partial content to avoid loading entire file
-            if isVideoFile(fileURL.lastPathComponent) {
-                // For videos without a Range header, send the first chunk as a 206 Partial Content
-                // This allows the browser to get metadata and then request specific ranges
-                let chunkSize: Int64 = min(1024 * 1024, fileSize) // 1MB or file size, whichever is smaller
-                
-                guard let fileHandle = try? FileHandle(forReadingFrom: fileURL) else {
-                    return HTTPResponse(statusCode: .internalServerError)
-                }
-                
-                defer { try? fileHandle.close() }
-                
-                guard let data = try? fileHandle.read(upToCount: Int(chunkSize)) else {
-                    return HTTPResponse(statusCode: .internalServerError)
-                }
-                
-                return HTTPResponse(
-                    statusCode: .partialContent,
-                    headers: [
-                        .contentType: mimeType,
-                        .contentRange: "bytes 0-\(chunkSize - 1)/\(fileSize)",
-                        .acceptRanges: "bytes",
-                        .contentLength: "\(data.count)"
-                    ],
-                    body: data
-                )
-            } else {
-                // For non-video files, serve normally
+            defer { try? fileHandle.close() }
+            
+            guard let data = try? fileHandle.read(upToCount: Int(chunkSize)) else {
+                return HTTPResponse(statusCode: .internalServerError)
+            }
+            
+            return HTTPResponse(
+                statusCode: .partialContent,
+                headers: [
+                    .contentType: mimeType,
+                    .contentRange: "bytes 0-\(chunkSize - 1)/\(fileSize)",
+                    .acceptRanges: "bytes",
+                    .contentLength: "\(data.count)"
+                ],
+                body: data
+            )
+        } else {
+            // For non-video files, serve normally
+            do {
                 let data = try Data(contentsOf: fileURL)
                 return HTTPResponse(statusCode: .ok,
                                   headers: [
@@ -567,9 +773,9 @@ class WebServerManager: NSObject, ObservableObject {
                                     .contentLength: "\(data.count)"
                                   ],
                                   body: data)
+            } catch {
+                return HTTPResponse(statusCode: .internalServerError)
             }
-        } catch {
-            return HTTPResponse(statusCode: .internalServerError)
         }
     }
     
