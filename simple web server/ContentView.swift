@@ -17,6 +17,7 @@ struct ContentView: View {
     @StateObject private var serverManager = WebServerManager()
     @State private var showFolderPicker = false
     @State private var showCopiedToast = false
+    @Environment(\.scenePhase) private var scenePhase
     
     var body: some View {
         VStack(spacing: 20) {
@@ -26,7 +27,7 @@ struct ContentView: View {
             
             if let folderURL = serverManager.selectedFolderURL {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(serverManager.sourceType == .photoGallery ? "Source: iPhone Photos" : "Selected Folder:")
+                    Text(serverManager.sourceType == .photoGallery ? "Source: Media Gallery" : "Selected Folder:")
                         .font(.headline)
                     if serverManager.sourceType == .folder {
                         Text(folderURL.path)
@@ -71,12 +72,12 @@ struct ContentView: View {
                             VStack(spacing: 8) {
                                 Image(systemName: "photo.fill.on.rectangle.fill")
                                     .font(.system(size: 32))
-                                Text("Photos")
+                                Text("Media Gallery")
                                     .font(.caption)
                             }
                             .frame(maxWidth: .infinity)
                             .padding()
-                            .background(Color.green)
+                            .background(Color.orange)
                             .foregroundColor(.white)
                             .cornerRadius(10)
                         }
@@ -206,6 +207,34 @@ struct ContentView: View {
                 }
             case .failure(let error):
                 serverManager.errorMessage = error.localizedDescription
+            }
+        }
+        .onChange(of: scenePhase) { oldPhase, newPhase in
+            // When app becomes active, check if server still has access
+            if newPhase == .active && oldPhase != .active {
+                checkServerAccess()
+            }
+        }
+    }
+    
+    // MARK: - Helper Functions
+    
+    private func checkServerAccess() {
+        // Only check if server is running
+        guard serverManager.isServerRunning else { return }
+        
+        // Validate folder/photo access
+        if !serverManager.validateFolderAccess() {
+            // Access lost - stop server and show warning
+            Task {
+                await serverManager.stopServer()
+                
+                // Set error message based on source type
+                if serverManager.sourceType == .photoGallery {
+                    serverManager.errorMessage = "⚠️ Server stopped: Photo library access was lost. Please restart the server."
+                } else {
+                    serverManager.errorMessage = "⚠️ Server stopped: Folder access was lost. Please select the folder again and restart the server."
+                }
             }
         }
     }

@@ -244,8 +244,29 @@ class WebServerManager: ObservableObject {
         // Re-enable idle timer (allow screen to lock)
         UIApplication.shared.isIdleTimerDisabled = false
         
-        if let url = selectedFolderURL {
+        if let url = selectedFolderURL, sourceType == .folder {
             url.stopAccessingSecurityScopedResource()
+        }
+    }
+    
+    func validateFolderAccess() -> Bool {
+        guard isServerRunning else { return true }
+        
+        // For photo gallery, check photo library authorization
+        if sourceType == .photoGallery {
+            let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+            return status == .authorized || status == .limited
+        }
+        
+        // For folder access, check if we can still read the directory
+        guard let folderURL = selectedFolderURL else { return false }
+        
+        // Try to access the directory
+        do {
+            let _ = try FileManager.default.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil)
+            return true
+        } catch {
+            return false
         }
     }
     
