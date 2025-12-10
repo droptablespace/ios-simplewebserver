@@ -9,6 +9,7 @@ import Foundation
 import FlyingFox
 import Zip
 import Photos
+import AVFoundation
 
 class RequestHandlers {
     private let htmlGenerator: HTMLGenerator
@@ -16,10 +17,110 @@ class RequestHandlers {
     private let photoGalleryManager: PhotoGalleryManager
     weak var webServerManager: WebServerManager?
     
+    // Cache for transcoded video URLs
+    private var transcodedVideoCache: [String: URL] = [:]
+    
     init(htmlGenerator: HTMLGenerator, securityManager: SecurityManager, photoGalleryManager: PhotoGalleryManager) {
         self.htmlGenerator = htmlGenerator
         self.securityManager = securityManager
         self.photoGalleryManager = photoGalleryManager
+    }
+    
+    // MARK: - Video Transcoding
+    
+    /// Transcodes a video to H.264 if it's in HEVC format
+    private func getCompatibleVideoURL(for originalURL: URL) async -> URL {
+        // Check if already cached
+        let cacheKey = originalURL.path
+        if let cachedURL = transcodedVideoCache[cacheKey],
+           FileManager.default.fileExists(atPath: cachedURL.path) {
+            return cachedURL
+        }
+        
+        // Check if video needs transcoding (HEVC/MOV files often need it)
+        let asset = AVURLAsset(url: originalURL)
+        
+        // Check video tracks for HEVC codec
+        let videoTracks = asset.tracks(withMediaType: .video)
+        var isHEVC = false
+        
+        for track in videoTracks {
+            for formatDescription in track.formatDescriptions {
+                let format = formatDescription as! CMFormatDescription
+                let codecType = CMFormatDescriptionGetMediaSubType(format)
+                // HEVC codec types: 'hvc1', 'hev1'
+                if codecType == kCMVideoCodecType_HEVC || codecType == kCMVideoCodecType_HEVCWithAlpha {
+                    isHEVC = true
+                    break
+                }
+            }
+        }
+        
+        // If not HEVC, return original URL
+        if !isHEVC {
+            print("Video is not HEVC, serving original: \(originalURL.lastPathComponent)")
+            return originalURL
+        }
+        
+        print("Video is HEVC, transcoding to H.264: \(originalURL.lastPathComponent)")
+        
+        // Create temp file for transcoded video
+        let tempDir = FileManager.default.temporaryDirectory
+        let filename = originalURL.deletingPathExtension().lastPathComponent
+        let tempVideoURL = tempDir.appendingPathComponent("transcoded_\(filename).mp4")
+        
+        // Remove existing file
+        try? FileManager.default.removeItem(at: tempVideoURL)
+        
+        // Choose appropriate preset based on video resolution
+        let naturalSize = videoTracks.first?.naturalSize ?? CGSize(width: 1920, height: 1080)
+        let maxDimension = max(naturalSize.width, naturalSize.height)
+        
+        let exportPreset: String
+        if maxDimension >= 1920 {
+            exportPreset = AVAssetExportPreset1920x1080
+        } else if maxDimension >= 1280 {
+            exportPreset = AVAssetExportPreset1280x720
+        } else if maxDimension >= 960 {
+            exportPreset = AVAssetExportPreset960x540
+        } else {
+            exportPreset = AVAssetExportPreset640x480
+        }
+        
+        // Transcode video
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: exportPreset) else {
+            print("Failed to create export session, serving original")
+            return originalURL
+        }
+        
+        exportSession.outputURL = tempVideoURL
+        exportSession.outputFileType = .mp4
+        
+        // Export asynchronously
+        await exportSession.export()
+        
+        if exportSession.status == .completed {
+            print("Transcoding completed successfully")
+            transcodedVideoCache[cacheKey] = tempVideoURL
+            return tempVideoURL
+        } else {
+            print("Transcoding failed: \(exportSession.error?.localizedDescription ?? "unknown error")")
+            return originalURL
+        }
+    }
+    
+    /// Clean up transcoded video cache
+    func cleanupTranscodedVideos() {
+        let tempDir = FileManager.default.temporaryDirectory
+        do {
+            let contents = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)
+            for file in contents where file.lastPathComponent.hasPrefix("transcoded_") {
+                try? FileManager.default.removeItem(at: file)
+            }
+        } catch {
+            print("Error cleaning transcoded videos: \(error)")
+        }
+        transcodedVideoCache.removeAll()
     }
     
     // MARK: - Security Handlers
@@ -44,13 +145,34 @@ class RequestHandlers {
     // MARK: - Static File Handler
     
     func handleStaticFileRequest(path: String) async -> HTTPResponse {
-        // Load static files from Templates folder
-        guard let staticFileURL = Bundle.main.url(forResource: path.replacingOccurrences(of: ".min.js", with: "").replacingOccurrences(of: ".js", with: ""), withExtension: path.contains(".min.js") ? "min.js" : "js", subdirectory: "Templates") else {
+        // Load static files from htmltemplates folder (or root if not found)
+        let filename: String
+        let fileExtension: String
+        
+        if path.hasSuffix(".min.js") {
+            filename = path.replacingOccurrences(of: ".min.js", with: "")
+            fileExtension = "min.js"
+        } else if path.hasSuffix(".js") {
+            filename = path.replacingOccurrences(of: ".js", with: "")
+            fileExtension = "js"
+        } else {
+            filename = path
+            fileExtension = ""
+        }
+        
+        // Try subdirectory first, then root of bundle
+        var staticFileURL = Bundle.main.url(forResource: filename, withExtension: fileExtension, subdirectory: "htmltemplates")
+        if staticFileURL == nil {
+            staticFileURL = Bundle.main.url(forResource: filename, withExtension: fileExtension)
+        }
+        
+        guard let fileURL = staticFileURL else {
+            print("Static file not found: \(filename).\(fileExtension)")
             return HTTPResponse(statusCode: .notFound)
         }
         
         do {
-            let data = try Data(contentsOf: staticFileURL)
+            let data = try Data(contentsOf: fileURL)
             let mimeType = path.hasSuffix(".js") ? "application/javascript" : "text/plain"
             
             return HTTPResponse(statusCode: .ok,
@@ -61,6 +183,7 @@ class RequestHandlers {
                               ],
                               body: data)
         } catch {
+            print("Error loading static file: \(error)")
             return HTTPResponse(statusCode: .internalServerError)
         }
     }
@@ -129,20 +252,46 @@ class RequestHandlers {
         
         let mimeType = FileUtilities.mimeTypeForPath(fileURL.path)
         
-        // Check for Range header
+        // Check for Range header - for videos, use transcoded version if HEVC
         if let rangeHeader = request?.headers[.range] {
-            do {
-                return try handleRangeRequest(fileURL: fileURL, rangeHeader: rangeHeader, fileSize: fileSize, mimeType: mimeType)
-            } catch {
-                return HTTPResponse(statusCode: .internalServerError)
+            if FileUtilities.isVideoFile(fileURL.lastPathComponent) {
+                let compatibleURL = await getCompatibleVideoURL(for: fileURL)
+                let actualFileSize: Int64
+                do {
+                    actualFileSize = try FileManager.default.attributesOfItem(atPath: compatibleURL.path)[.size] as? Int64 ?? 0
+                } catch {
+                    return HTTPResponse(statusCode: .internalServerError)
+                }
+                let actualMimeType = compatibleURL.path != fileURL.path ? "video/mp4" : mimeType
+                do {
+                    return try handleRangeRequest(fileURL: compatibleURL, rangeHeader: rangeHeader, fileSize: actualFileSize, mimeType: actualMimeType)
+                } catch {
+                    return HTTPResponse(statusCode: .internalServerError)
+                }
+            } else {
+                do {
+                    return try handleRangeRequest(fileURL: fileURL, rangeHeader: rangeHeader, fileSize: fileSize, mimeType: mimeType)
+                } catch {
+                    return HTTPResponse(statusCode: .internalServerError)
+                }
             }
         }
         
-        // No range request - for video files, always use partial content to avoid loading entire file
+        // No range request - for video files, use transcoding if HEVC and stream
         if FileUtilities.isVideoFile(fileURL.lastPathComponent) {
-            let chunkSize: Int64 = min(1024 * 1024, fileSize)
+            // Get compatible video URL (transcodes HEVC to H.264 if needed)
+            let compatibleURL = await getCompatibleVideoURL(for: fileURL)
             
-            guard let fileHandle = try? FileHandle(forReadingFrom: fileURL) else {
+            let actualFileSize: Int64
+            do {
+                actualFileSize = try FileManager.default.attributesOfItem(atPath: compatibleURL.path)[.size] as? Int64 ?? 0
+            } catch {
+                return HTTPResponse(statusCode: .internalServerError)
+            }
+            
+            let chunkSize: Int64 = min(1024 * 1024, actualFileSize)
+            
+            guard let fileHandle = try? FileHandle(forReadingFrom: compatibleURL) else {
                 return HTTPResponse(statusCode: .internalServerError)
             }
             
@@ -152,11 +301,14 @@ class RequestHandlers {
                 return HTTPResponse(statusCode: .internalServerError)
             }
             
+            // Use video/mp4 for transcoded videos
+            let actualMimeType = compatibleURL.path != fileURL.path ? "video/mp4" : mimeType
+            
             return HTTPResponse(
                 statusCode: .partialContent,
                 headers: [
-                    .contentType: mimeType,
-                    .contentRange: "bytes 0-\(chunkSize - 1)/\(fileSize)",
+                    .contentType: actualMimeType,
+                    .contentRange: "bytes 0-\(chunkSize - 1)/\(actualFileSize)",
                     .acceptRanges: "bytes",
                     .contentLength: "\(data.count)"
                 ],

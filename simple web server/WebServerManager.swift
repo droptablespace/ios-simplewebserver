@@ -437,6 +437,10 @@ class WebServerManager: NSObject, ObservableObject {
         // Clear authorized codes when server stops
         securityManager.clearAuthorizedCodes()
         
+        // Clean up temporary video files
+        photoGalleryManager.cleanupTempVideos()
+        requestHandlers.cleanupTranscodedVideos()
+        
         // Re-enable idle timer (allow screen to lock)
         UIApplication.shared.isIdleTimerDisabled = false
         

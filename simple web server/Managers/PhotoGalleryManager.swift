@@ -119,20 +119,113 @@ class PhotoGalleryManager: ObservableObject {
             return nil
         }
         
+        // Create a unique temp file for this video
+        let tempDir = FileManager.default.temporaryDirectory
+        let safeAssetId = assetId.replacingOccurrences(of: "/", with: "_")
+        let tempVideoURL = tempDir.appendingPathComponent("video_\(safeAssetId).mp4")
+        
+        // If temp file already exists, use it
+        if FileManager.default.fileExists(atPath: tempVideoURL.path) {
+            return tempVideoURL
+        }
+        
+        // Choose appropriate export preset based on video resolution
+        // This ensures H.264 output which is universally supported
+        let exportPreset: String
+        let videoWidth = asset.pixelWidth
+        let videoHeight = asset.pixelHeight
+        let maxDimension = max(videoWidth, videoHeight)
+        
+        if maxDimension >= 1920 {
+            exportPreset = AVAssetExportPreset1920x1080
+        } else if maxDimension >= 1280 {
+            exportPreset = AVAssetExportPreset1280x720
+        } else if maxDimension >= 960 {
+            exportPreset = AVAssetExportPreset960x540
+        } else {
+            exportPreset = AVAssetExportPreset640x480
+        }
+        
+        print("Video dimensions: \(videoWidth)x\(videoHeight), using preset: \(exportPreset)")
+        
+        // Export video using AVAssetExportSession with H.264 for maximum compatibility
         return await withCheckedContinuation { continuation in
             let videoManager = PHImageManager.default()
             let options = PHVideoRequestOptions()
             options.isNetworkAccessAllowed = true
             options.deliveryMode = .highQualityFormat
             
-            videoManager.requestAVAsset(forVideo: asset, options: options) { avAsset, _, _ in
-                guard let urlAsset = avAsset as? AVURLAsset else {
-                    continuation.resume(returning: nil)
+            // Request export session with resolution preset to force H.264 transcoding
+            videoManager.requestExportSession(forVideo: asset, options: options, exportPreset: exportPreset) { exportSession, _ in
+                guard let exportSession = exportSession else {
+                    print("Export session creation failed, trying direct export")
+                    // If export session fails, try direct resource export
+                    self.exportVideoDirectly(for: asset, to: tempVideoURL, continuation: continuation)
                     return
                 }
                 
-                continuation.resume(returning: urlAsset.url)
+                // Remove existing temp file if any
+                try? FileManager.default.removeItem(at: tempVideoURL)
+                
+                exportSession.outputURL = tempVideoURL
+                exportSession.outputFileType = .mp4
+                
+                exportSession.exportAsynchronously {
+                    switch exportSession.status {
+                    case .completed:
+                        print("Video export completed successfully to H.264")
+                        continuation.resume(returning: tempVideoURL)
+                    case .failed:
+                        print("Export failed: \(exportSession.error?.localizedDescription ?? "unknown error")")
+                        // Try direct export as fallback
+                        self.exportVideoDirectly(for: asset, to: tempVideoURL, continuation: continuation)
+                    case .cancelled:
+                        print("Export cancelled")
+                        continuation.resume(returning: nil)
+                    default:
+                        print("Export unknown status: \(exportSession.status)")
+                        continuation.resume(returning: nil)
+                    }
+                }
             }
+        }
+    }
+    
+    private func exportVideoDirectly(for asset: PHAsset, to tempVideoURL: URL, continuation: CheckedContinuation<URL?, Never>) {
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let videoResource = resources.first(where: { $0.type == .video || $0.type == .fullSizeVideo }) else {
+            continuation.resume(returning: nil)
+            return
+        }
+        
+        // Use PHAssetResourceManager for direct export
+        let resourceManager = PHAssetResourceManager.default()
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+        
+        // Remove existing temp file if any
+        try? FileManager.default.removeItem(at: tempVideoURL)
+        
+        resourceManager.writeData(for: videoResource, toFile: tempVideoURL, options: options) { error in
+            if error == nil {
+                continuation.resume(returning: tempVideoURL)
+            } else {
+                print("Error exporting video directly: \(error!)")
+                continuation.resume(returning: nil)
+            }
+        }
+    }
+    
+    // Clean up temp videos when they're no longer needed
+    func cleanupTempVideos() {
+        let tempDir = FileManager.default.temporaryDirectory
+        do {
+            let contents = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)
+            for file in contents where file.lastPathComponent.hasPrefix("video_") {
+                try? FileManager.default.removeItem(at: file)
+            }
+        } catch {
+            print("Error cleaning temp videos: \(error)")
         }
     }
 }

@@ -20,6 +20,7 @@ struct ContentView: View {
     @State private var showFolderPicker = false
     @State private var showCopiedToast = false
     @State private var showQRScanner = false
+    @State private var showManualEntry = false
     @State private var secureMode = false
     @Environment(\.scenePhase) private var scenePhase
     
@@ -151,6 +152,15 @@ struct ContentView: View {
                                         .cornerRadius(10)
                                 }
                                 .padding(.horizontal)
+                                
+                                Button(action: {
+                                    showManualEntry = true
+                                }) {
+                                    Text("Enter manually")
+                                        .font(.caption)
+                                        .foregroundColor(.blue)
+                                        .underline()
+                                }
                                 
                                 if !serverManager.authorizedCodes.isEmpty {
                                     Text("Authorized clients: \(serverManager.authorizedCodes.count)")
@@ -292,6 +302,9 @@ struct ContentView: View {
         .sheet(isPresented: $showQRScanner) {
             QRScannerView(serverManager: serverManager, isPresented: $showQRScanner)
         }
+        .sheet(isPresented: $showManualEntry) {
+            ManualEntryView(serverManager: serverManager, isPresented: $showManualEntry)
+        }
         .onChange(of: scenePhase) { oldPhase, newPhase in
             // When app becomes active, check if server still has access
             if newPhase == .active && oldPhase != .active {
@@ -403,6 +416,138 @@ struct QRScannerView: View {
     private func handleScan(_ code: String) {
         scannedCode = code
         serverManager.authorizeCode(code)
+    }
+}
+
+// MARK: - Manual Entry View
+struct ManualEntryView: View {
+    @ObservedObject var serverManager: WebServerManager
+    @Binding var isPresented: Bool
+    @State private var enteredCode: String = ""
+    @State private var showSuccess = false
+    @State private var showError = false
+    @State private var errorMessage = ""
+    @FocusState private var isTextFieldFocused: Bool
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                if showSuccess {
+                    VStack(spacing: 20) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 60))
+                            .foregroundColor(.green)
+                        
+                        Text("Code Added!")
+                            .font(.title)
+                        
+                        Text("The authorization code has been added successfully.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                        
+                        Button("Done") {
+                            isPresented = false
+                        }
+                        .padding()
+                        .background(Color.blue)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                    }
+                    .padding()
+                } else {
+                    VStack(spacing: 20) {
+                        Image(systemName: "keyboard")
+                            .font(.system(size: 60))
+                            .foregroundColor(.blue)
+                        
+                        Text("Enter Authorization Code")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                        
+                        Text("Enter the code displayed on the webpage")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Authorization Code:")
+                                .font(.headline)
+                            
+                            TextField("Enter code here", text: $enteredCode)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                                .focused($isTextFieldFocused)
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                                .onSubmit {
+                                    submitCode()
+                                }
+                        }
+                        
+                        Button(action: {
+                            submitCode()
+                        }) {
+                            Text("Authorize")
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(enteredCode.isEmpty ? Color.gray : Color.green)
+                                .foregroundColor(.white)
+                                .cornerRadius(10)
+                        }
+                        .disabled(enteredCode.isEmpty)
+                        
+                        Spacer()
+                    }
+                    .padding()
+                }
+            }
+            .navigationTitle("Manual Entry")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") {
+                        isPresented = false
+                    }
+                }
+            }
+            .alert("Invalid Code", isPresented: $showError) {
+                Button("OK") { }
+            } message: {
+                Text(errorMessage)
+            }
+            .onAppear {
+                isTextFieldFocused = true
+            }
+        }
+    }
+    
+    private func submitCode() {
+        let trimmedCode = enteredCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        guard !trimmedCode.isEmpty else {
+            errorMessage = "Please enter a valid code."
+            showError = true
+            return
+        }
+        
+        // Basic validation - check if code looks reasonable
+        if trimmedCode.count < 3 {
+            errorMessage = "Code appears to be too short. Please check and try again."
+            showError = true
+            return
+        }
+        
+        // Authorize the code
+        serverManager.authorizeCode(trimmedCode)
+        
+        withAnimation {
+            showSuccess = true
+        }
+        
+        // Auto-close after a delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            isPresented = false
+        }
     }
 }
 

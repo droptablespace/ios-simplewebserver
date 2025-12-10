@@ -15,34 +15,27 @@ class HTMLGenerator {
     private let secureTemplate: String
     
     init() {
-        // Load templates from Templates folder
-        if let folderURL = Bundle.main.url(forResource: "folder_template", withExtension: "html", subdirectory: "Templates"),
-           let folderHTML = try? String(contentsOf: folderURL, encoding: .utf8) {
-            folderTemplate = folderHTML
-        } else {
-            folderTemplate = ""
+        // Helper function to load template from bundle (tries subdirectory first, then root)
+        func loadTemplate(named name: String, extension ext: String) -> String {
+            // Try subdirectory first
+            if let url = Bundle.main.url(forResource: name, withExtension: ext, subdirectory: "htmltemplates"),
+               let content = try? String(contentsOf: url, encoding: .utf8) {
+                return content
+            }
+            // Try root of bundle
+            if let url = Bundle.main.url(forResource: name, withExtension: ext),
+               let content = try? String(contentsOf: url, encoding: .utf8) {
+                return content
+            }
+            print("Warning: Could not load template: \(name).\(ext)")
+            return ""
         }
         
-        if let galleryURL = Bundle.main.url(forResource: "gallery_template", withExtension: "html", subdirectory: "Templates"),
-           let galleryHTML = try? String(contentsOf: galleryURL, encoding: .utf8) {
-            galleryTemplate = galleryHTML
-        } else {
-            galleryTemplate = ""
-        }
-        
-        if let errorURL = Bundle.main.url(forResource: "error_template", withExtension: "html", subdirectory: "Templates"),
-           let errorHTML = try? String(contentsOf: errorURL, encoding: .utf8) {
-            errorTemplate = errorHTML
-        } else {
-            errorTemplate = ""
-        }
-        
-        if let secureURL = Bundle.main.url(forResource: "secure_template", withExtension: "html", subdirectory: "Templates"),
-           let secureHTML = try? String(contentsOf: secureURL, encoding: .utf8) {
-            secureTemplate = secureHTML
-        } else {
-            secureTemplate = ""
-        }
+        // Load templates
+        folderTemplate = loadTemplate(named: "folder_template", extension: "html")
+        galleryTemplate = loadTemplate(named: "gallery_template", extension: "html")
+        errorTemplate = loadTemplate(named: "error_template", extension: "html")
+        secureTemplate = loadTemplate(named: "secure_template", extension: "html")
     }
     
     // MARK: - Folder HTML Generation
@@ -283,9 +276,42 @@ class HTMLGenerator {
                 }
                 video {
                     max-width: 100%;
-                    max-height: 80vh;
+                    max-height: 70vh;
                     border-radius: 8px;
                     box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+                }
+                .controls {
+                    margin-top: 20px;
+                    display: flex;
+                    gap: 15px;
+                    flex-wrap: wrap;
+                    justify-content: center;
+                }
+                .download-btn {
+                    display: inline-block;
+                    padding: 12px 24px;
+                    background: #007AFF;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 8px;
+                    font-weight: 500;
+                    transition: background 0.2s;
+                }
+                .download-btn:hover {
+                    background: #0051D5;
+                }
+                .back-btn {
+                    display: inline-block;
+                    padding: 12px 24px;
+                    background: #666;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 8px;
+                    font-weight: 500;
+                    transition: background 0.2s;
+                }
+                .back-btn:hover {
+                    background: #888;
                 }
             </style>
         </head>
@@ -294,10 +320,14 @@ class HTMLGenerator {
                 <h1>🎬 Video Player</h1>
                 <div class="filename">\(filename)</div>
             </div>
-            <video controls preload="metadata">
-                <source src="/file/\(encodedPath)?raw=true" type="\(FileUtilities.mimeTypeForPath(filename))">
+            <video controls preload="metadata" playsinline>
+                <source src="/file/\(encodedPath)?raw=true" type="video/mp4">
                 Your browser does not support the video element.
             </video>
+            <div class="controls">
+                <a href="javascript:history.back()" class="back-btn">← Back</a>
+                <a href="/download/\(encodedPath)" class="download-btn" download>⬇️ Download Video</a>
+            </div>
         </body>
         </html>
         """

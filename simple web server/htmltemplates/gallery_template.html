@@ -184,18 +184,24 @@
     <div class='gallery'>
         {{GALLERY_ITEMS}}
     </div>
-    <div class='lightbox' id='lightbox' onclick='closeLightbox()'>
-        <span class='lightbox-close'>×</span>
+    <div class='lightbox' id='lightbox' onclick='handleLightboxClick(event)'>
+        <span class='lightbox-close' onclick='event.stopPropagation(); closeLightbox()'>×</span>
         <span class='lightbox-nav lightbox-prev' onclick='event.stopPropagation(); changeImage(-1)'>‹</span>
-        <img id='lightbox-img' src='' alt='' loading='lazy'>
+        <img id='lightbox-img' src='' alt='' loading='lazy' onclick='event.stopPropagation()'>
         <span class='lightbox-nav lightbox-next' onclick='event.stopPropagation(); changeImage(1)'>›</span>
     </div>
-    <div class='video-dialog' id='video-dialog' onclick='closeVideoDialog()'>
-        <span class='video-dialog-close' onclick='closeVideoDialog()'>×</span>
-        <video id='video-player' controls onclick='event.stopPropagation()'>
-            <source id='video-source' src='' type=''>
+    <div class='video-dialog' id='video-dialog' onclick='handleVideoDialogClick(event)'>
+        <span class='video-dialog-close' onclick='event.stopPropagation(); closeVideoDialog()'>×</span>
+        <span class='lightbox-nav lightbox-prev' onclick='event.stopPropagation(); changeMedia(-1)'>‹</span>
+        <video id='video-player' controls playsinline webkit-playsinline onclick='event.stopPropagation()'>
+            <source id='video-source' src='' type='video/mp4'>
             Your browser does not support the video tag.
         </video>
+        <div id='video-error' style='display:none; color: #ff6b6b; text-align: center; padding: 20px;'>
+            <p>⚠️ Video playback error</p>
+            <p style='font-size: 14px;'>This video format may not be supported by your browser.</p>
+        </div>
+        <span class='lightbox-nav lightbox-next' onclick='event.stopPropagation(); changeMedia(1)'>›</span>
     </div>
     <script>
         const media = [{{MEDIA_ITEMS}}];
@@ -222,12 +228,63 @@
             document.getElementById('lightbox').classList.remove('active');
         }
         
+        function handleLightboxClick(event) {
+            // Only close if clicking on the background (not on the image or controls)
+            if (event.target.id === 'lightbox') {
+                closeLightbox();
+            }
+        }
+        
         function closeVideoDialog() {
             const dialog = document.getElementById('video-dialog');
             const videoPlayer = document.getElementById('video-player');
             videoPlayer.pause();
             videoPlayer.currentTime = 0;
             dialog.classList.remove('active');
+        }
+        
+        function handleVideoDialogClick(event) {
+            // Only close if clicking on the background (not on the video or controls)
+            if (event.target.id === 'video-dialog') {
+                closeVideoDialog();
+            }
+        }
+        
+        // Navigate to any media (image or video)
+        function changeMedia(direction) {
+            if (media.length <= 1) return;
+            
+            // Stop current video if playing
+            const videoDialog = document.getElementById('video-dialog');
+            const lightbox = document.getElementById('lightbox');
+            const wasVideo = videoDialog.classList.contains('active');
+            
+            if (wasVideo) {
+                const videoPlayer = document.getElementById('video-player');
+                videoPlayer.pause();
+                videoPlayer.currentTime = 0;
+            }
+            
+            // Calculate new index
+            currentIndex = (currentIndex + direction + media.length) % media.length;
+            const item = media[currentIndex];
+            
+            // Close current viewer
+            videoDialog.classList.remove('active');
+            lightbox.classList.remove('active');
+            
+            // Open new media
+            if (item.type === 'image') {
+                document.getElementById('lightbox-img').src = item.path;
+                lightbox.classList.add('active');
+            } else if (item.type === 'video') {
+                const videoPlayer = document.getElementById('video-player');
+                const videoSource = document.getElementById('video-source');
+                videoSource.src = item.path;
+                videoSource.type = item.mimeType || 'video/mp4';
+                videoPlayer.load();
+                videoDialog.classList.add('active');
+            }
         }
         
         function changeImage(direction) {
@@ -259,8 +316,10 @@
                 if (e.key === 'ArrowRight') changeImage(1);
             }
             
-            if (videoActive && e.key === 'Escape') {
-                closeVideoDialog();
+            if (videoActive) {
+                if (e.key === 'Escape') closeVideoDialog();
+                if (e.key === 'ArrowLeft') changeMedia(-1);
+                if (e.key === 'ArrowRight') changeMedia(1);
             }
         });
         
@@ -288,6 +347,56 @@
                 lazyImageObserver.observe(lazyImage);
             });
         });
+        
+        // Touch swipe support for mobile
+        let touchStartX = 0;
+        let touchStartY = 0;
+        let touchEndX = 0;
+        let touchEndY = 0;
+        const swipeThreshold = 50; // Minimum distance for swipe
+        
+        const lightbox = document.getElementById('lightbox');
+        
+        lightbox.addEventListener('touchstart', function(e) {
+            touchStartX = e.changedTouches[0].screenX;
+            touchStartY = e.changedTouches[0].screenY;
+        }, { passive: true });
+        
+        lightbox.addEventListener('touchend', function(e) {
+            touchEndX = e.changedTouches[0].screenX;
+            touchEndY = e.changedTouches[0].screenY;
+            handleSwipe();
+        }, { passive: true });
+        
+        function handleSwipe(isVideo) {
+            const deltaX = touchEndX - touchStartX;
+            const deltaY = touchEndY - touchStartY;
+            
+            // Only handle horizontal swipes (ignore vertical)
+            if (Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > swipeThreshold) {
+                if (deltaX > 0) {
+                    // Swipe right - previous
+                    isVideo ? changeMedia(-1) : changeImage(-1);
+                } else {
+                    // Swipe left - next
+                    isVideo ? changeMedia(1) : changeImage(1);
+                }
+            }
+        }
+        
+        // Add swipe support for video dialog
+        const videoDialog = document.getElementById('video-dialog');
+        
+        videoDialog.addEventListener('touchstart', function(e) {
+            touchStartX = e.changedTouches[0].screenX;
+            touchStartY = e.changedTouches[0].screenY;
+        }, { passive: true });
+        
+        videoDialog.addEventListener('touchend', function(e) {
+            touchEndX = e.changedTouches[0].screenX;
+            touchEndY = e.changedTouches[0].screenY;
+            handleSwipe(true);
+        }, { passive: true });
     </script>
 </body>
 </html>
