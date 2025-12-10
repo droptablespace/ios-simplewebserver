@@ -105,10 +105,19 @@ struct ContentView: View {
                             
                             if !serverManager.networkAddresses.isEmpty {
                                 Divider()
-                                Text("Access from other devices:")
+                                Text("Access from other devices on local network:")
                                     .font(.caption)
                                     .fontWeight(.semibold)
                                 
+                                // mDNS address (Bonjour) - using actual Bonjour hostname
+                                if let bonjourHost = serverManager.bonjourHostname {
+                                    AddressRow(
+                                        address: "http://\(bonjourHost):\(String(serverManager.port))",
+                                        showCopiedToast: $showCopiedToast
+                                    )
+                                }
+                                
+                                // IP addresses
                                 ForEach(serverManager.networkAddresses, id: \.self) { address in
                                     AddressRow(
                                         address: "http://\(address):\(String(serverManager.port))",
@@ -218,6 +227,20 @@ struct ContentView: View {
     }
     
     // MARK: - Helper Functions
+    
+    private func getDeviceName() -> String {
+        #if os(iOS)
+        let deviceName = UIDevice.current.name
+        #elseif os(macOS)
+        let deviceName = Host.current().localizedName ?? "device"
+        #endif
+        
+        return deviceName
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+            .replacingOccurrences(of: "'", with: "")
+            .replacingOccurrences(of: "\"", with: "")
+    }
     
     private func checkServerAccess() {
         // Only check if server is running
