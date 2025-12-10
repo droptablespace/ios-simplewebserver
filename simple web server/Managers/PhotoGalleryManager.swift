@@ -167,9 +167,6 @@ class PhotoGalleryManager: ObservableObject {
                 // Remove existing temp file if any
                 try? FileManager.default.removeItem(at: tempVideoURL)
                 
-                exportSession.outputURL = tempVideoURL
-                exportSession.outputFileType = .mp4
-                
                 Task {
                     do {
                         try await exportSession.export(to: tempVideoURL, as: .mp4)
