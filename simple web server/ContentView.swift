@@ -99,6 +99,22 @@ struct ContentView: View {
                                 .cornerRadius(10)
                         }
                         .padding(.horizontal)
+                        
+                        #if os(iOS)
+                        VStack(spacing: 4) {
+                            HStack(alignment: .top, spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                                Text("Note: While the server is running, your iPhone will not sleep. This will lead to battery drain.")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .padding(.horizontal)
+                        .padding(.top, 4)
+                        #endif
                     }
                 } else {
                     Button(action: {
