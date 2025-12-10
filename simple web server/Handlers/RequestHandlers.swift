@@ -40,18 +40,25 @@ class RequestHandlers {
         // Check if video needs transcoding (HEVC/MOV files often need it)
         let asset = AVURLAsset(url: originalURL)
         
-        // Check video tracks for HEVC codec
-        let videoTracks = asset.tracks(withMediaType: .video)
+        // Check video tracks for HEVC codec using modern API
+        guard let allTracks = try? await asset.load(.tracks) else {
+            return originalURL
+        }
+        
+        // Filter video tracks by checking each track's media type
+        let videoTracks = allTracks.filter { $0.mediaType == .video }
+        
         var isHEVC = false
         
         for track in videoTracks {
-            for formatDescription in track.formatDescriptions {
-                let format = formatDescription as! CMFormatDescription
-                let codecType = CMFormatDescriptionGetMediaSubType(format)
-                // HEVC codec types: 'hvc1', 'hev1'
-                if codecType == kCMVideoCodecType_HEVC || codecType == kCMVideoCodecType_HEVCWithAlpha {
-                    isHEVC = true
-                    break
+            if let formatDescriptions = try? await track.load(.formatDescriptions) {
+                for formatDescription in formatDescriptions {
+                    let codecType = CMFormatDescriptionGetMediaSubType(formatDescription)
+                    // HEVC codec types: 'hvc1', 'hev1'
+                    if codecType == kCMVideoCodecType_HEVC || codecType == kCMVideoCodecType_HEVCWithAlpha {
+                        isHEVC = true
+                        break
+                    }
                 }
             }
         }
@@ -72,8 +79,14 @@ class RequestHandlers {
         // Remove existing file
         try? FileManager.default.removeItem(at: tempVideoURL)
         
-        // Choose appropriate preset based on video resolution
-        let naturalSize = videoTracks.first?.naturalSize ?? CGSize(width: 1920, height: 1080)
+        // Choose appropriate preset based on video resolution using modern API
+        let naturalSize: CGSize
+        if let firstTrack = videoTracks.first,
+           let loadedSize = try? await firstTrack.load(.naturalSize) {
+            naturalSize = loadedSize
+        } else {
+            naturalSize = CGSize(width: 1920, height: 1080)
+        }
         let maxDimension = max(naturalSize.width, naturalSize.height)
         
         let exportPreset: String
@@ -87,7 +100,7 @@ class RequestHandlers {
             exportPreset = AVAssetExportPreset640x480
         }
         
-        // Transcode video
+        // Transcode video using modern API
         guard let exportSession = AVAssetExportSession(asset: asset, presetName: exportPreset) else {
             print("Failed to create export session, serving original")
             return originalURL
@@ -96,15 +109,14 @@ class RequestHandlers {
         exportSession.outputURL = tempVideoURL
         exportSession.outputFileType = .mp4
         
-        // Export asynchronously
-        await exportSession.export()
-        
-        if exportSession.status == .completed {
+        // Export asynchronously using modern API
+        do {
+            try await exportSession.export(to: tempVideoURL, as: .mp4)
             print("Transcoding completed successfully")
             transcodedVideoCache[cacheKey] = tempVideoURL
             return tempVideoURL
-        } else {
-            print("Transcoding failed: \(exportSession.error?.localizedDescription ?? "unknown error")")
+        } catch {
+            print("Transcoding failed: \(error.localizedDescription)")
             return originalURL
         }
     }

@@ -170,21 +170,15 @@ class PhotoGalleryManager: ObservableObject {
                 exportSession.outputURL = tempVideoURL
                 exportSession.outputFileType = .mp4
                 
-                exportSession.exportAsynchronously {
-                    switch exportSession.status {
-                    case .completed:
+                Task {
+                    do {
+                        try await exportSession.export(to: tempVideoURL, as: .mp4)
                         print("Video export completed successfully to H.264")
                         continuation.resume(returning: tempVideoURL)
-                    case .failed:
-                        print("Export failed: \(exportSession.error?.localizedDescription ?? "unknown error")")
+                    } catch {
+                        print("Export failed: \(error.localizedDescription)")
                         // Try direct export as fallback
                         self.exportVideoDirectly(for: asset, to: tempVideoURL, continuation: continuation)
-                    case .cancelled:
-                        print("Export cancelled")
-                        continuation.resume(returning: nil)
-                    default:
-                        print("Export unknown status: \(exportSession.status)")
-                        continuation.resume(returning: nil)
                     }
                 }
             }

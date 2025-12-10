@@ -300,19 +300,6 @@ class HTMLGenerator {
                 .download-btn:hover {
                     background: #0051D5;
                 }
-                .back-btn {
-                    display: inline-block;
-                    padding: 12px 24px;
-                    background: #666;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 8px;
-                    font-weight: 500;
-                    transition: background 0.2s;
-                }
-                .back-btn:hover {
-                    background: #888;
-                }
             </style>
         </head>
         <body>
@@ -325,7 +312,6 @@ class HTMLGenerator {
                 Your browser does not support the video element.
             </video>
             <div class="controls">
-                <a href="javascript:history.back()" class="back-btn">← Back</a>
                 <a href="/download/\(encodedPath)" class="download-btn" download>⬇️ Download Video</a>
             </div>
         </body>

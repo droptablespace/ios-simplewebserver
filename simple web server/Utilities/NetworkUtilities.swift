@@ -53,4 +53,58 @@ class NetworkUtilities {
               let second = Int(components[1]) else { return false }
         return second >= 16 && second <= 31
     }
+    
+    /// Check if an IP address is private/local (RFC 1918 + loopback + link-local)
+    /// - Parameter address: IPv4 address string (e.g., "192.168.1.1")
+    /// - Returns: true if the address is a private/local network address
+    nonisolated static func isPrivateIP(_ address: String) -> Bool {
+        // Handle IPv6 localhost
+        if address == "::1" || address == "0:0:0:0:0:0:0:1" {
+            return true
+        }
+        
+        // Extract IPv4 from potential IPv6-mapped address (e.g., "::ffff:192.168.1.1")
+        let ipv4Address: String
+        if address.contains("::ffff:") {
+            ipv4Address = String(address.split(separator: ":").last ?? "")
+        } else {
+            ipv4Address = address
+        }
+        
+        let components = ipv4Address.split(separator: ".")
+        guard components.count == 4,
+              let first = Int(components[0]),
+              let second = Int(components[1]) else { 
+            // If we can't parse as IPv4, allow it (might be localhost or other valid local address)
+            return address.isEmpty || address == "localhost"
+        }
+        
+        // 10.0.0.0/8 - Private class A
+        if first == 10 {
+            return true
+        }
+        
+        // 172.16.0.0/12 - Private class B (172.16.x.x - 172.31.x.x)
+        if first == 172 && second >= 16 && second <= 31 {
+            return true
+        }
+        
+        // 192.168.0.0/16 - Private class C
+        if first == 192 && second == 168 {
+            return true
+        }
+        
+        // 127.0.0.0/8 - Loopback
+        if first == 127 {
+            return true
+        }
+        
+        // 169.254.0.0/16 - Link-local
+        if first == 169 && second == 254 {
+            return true
+        }
+        
+        // Not a private IP
+        return false
+    }
 }

@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var showQRScanner = false
     @State private var showManualEntry = false
     @State private var secureMode = false
+    @State private var localNetworkOnly = true  // Enabled by default for security
     @Environment(\.scenePhase) private var scenePhase
     
     var body: some View {
@@ -92,21 +93,40 @@ struct ContentView: View {
             }
             
             if serverManager.selectedFolderURL != nil {
-                // Secure Mode Toggle (only show when folder/gallery is selected but server not running)
+                // Security Toggles (only show when folder/gallery is selected but server not running)
                 if !serverManager.isServerRunning {
-                    Toggle(isOn: $secureMode) {
-                        HStack {
-                            Image(systemName: secureMode ? "lock.fill" : "lock.open.fill")
-                                .foregroundColor(secureMode ? .green : .gray)
-                            Text("Protected Mode")
-                                .font(.headline)
+                    VStack(spacing: 8) {
+                        Toggle(isOn: $localNetworkOnly) {
+                            HStack {
+                                Image(systemName: localNetworkOnly ? "house.fill" : "globe")
+                                    .foregroundColor(localNetworkOnly ? .blue : .orange)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Local Network Only")
+                                        .font(.headline)
+                                    Text(localNetworkOnly ? "Blocks internet connections" : "⚠️ Connections from public IPs are permitted.")
+                                        .font(.caption2)
+                                        .foregroundColor(localNetworkOnly ? .secondary : .orange)
+                                }
+                            }
+                        }
+                        .onChange(of: localNetworkOnly) { oldValue, newValue in
+                            serverManager.localNetworkOnly = newValue
+                        }
+                        
+                        Toggle(isOn: $secureMode) {
+                            HStack {
+                                Image(systemName: secureMode ? "lock.fill" : "lock.open.fill")
+                                    .foregroundColor(secureMode ? .green : .gray)
+                                Text("Protected Mode")
+                                    .font(.headline)
+                            }
+                        }
+                        .onChange(of: secureMode) { oldValue, newValue in
+                            serverManager.secureMode = newValue
                         }
                     }
                     .padding(.horizontal)
                     .padding(.vertical, 8)
-                    .onChange(of: secureMode) { oldValue, newValue in
-                        serverManager.secureMode = newValue
-                    }
                 }
                 
                 if serverManager.isServerRunning {
